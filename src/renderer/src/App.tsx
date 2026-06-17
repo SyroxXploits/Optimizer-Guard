@@ -268,6 +268,18 @@ function TaskDisabler({
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${task.path}`, async () => {
       const result = await window.optimizerGuard.setTaskState(task.path, enable)
       assertCommandSuccess(result)
+      setTasks((current) =>
+        current.map((row) =>
+          row.path === task.path
+            ? {
+                ...row,
+                enabled: enable,
+                status: enable ? 'Ready' : 'Disabled',
+                nextRun: enable ? row.nextRun : ''
+              }
+            : row
+        )
+      )
       await refresh()
       return result
     }, `${enable ? 'Enabled' : 'Disabled'} ${task.path}`)

@@ -118,6 +118,9 @@ export class OptimizerService {
   }
 
   async queryTasks(): Promise<ScheduledTaskRow[]> {
+    const exactRows = await this.queryTasksPowerShellFallback('primary exact task state')
+    if (exactRows.length > 0) return exactRows
+
     const result = await this.runCommand('schtasks.exe', ['/query', '/fo', 'CSV', '/v'], {
       kind: 'task',
       label: 'Query scheduled tasks'
