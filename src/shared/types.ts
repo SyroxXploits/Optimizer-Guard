@@ -116,6 +116,7 @@ export interface CleanResult {
   afterBytes: number
   savedBytes: number
   logs: CommandLogEntry[]
+  targets?: CleanTarget[]
 }
 
 export interface NvidiaProfile {

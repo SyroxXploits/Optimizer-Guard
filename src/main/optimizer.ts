@@ -354,7 +354,10 @@ export class OptimizerService {
   }
 
   async scanCleaningTargets(): Promise<CleanTarget[]> {
-    const targets = this.getCleanDefinitions()
+    return this.buildCleanTargets(this.getCleanDefinitions())
+  }
+
+  private async buildCleanTargets(targets: CleanTarget[]): Promise<CleanTarget[]> {
     const estimates = await this.estimateTargets(targets.filter((target) => !target.commandOnly))
     return targets.map((target) => {
       const estimate = estimates[target.id]
@@ -369,7 +372,8 @@ export class OptimizerService {
   }
 
   async cleanTargets(ids: string[], dryRun: boolean): Promise<CleanResult> {
-    const targets = (await this.scanCleaningTargets()).filter((target) => ids.includes(target.id))
+    const definitions = this.getCleanDefinitions().filter((target) => ids.includes(target.id))
+    const targets = await this.buildCleanTargets(definitions)
     const beforeBytes = targets.reduce((sum, target) => sum + target.estimatedBytes, 0)
     const logs: CommandLogEntry[] = []
 
@@ -386,9 +390,9 @@ export class OptimizerService {
       }
     }
 
-    const afterScan = await this.scanCleaningTargets()
-    const afterBytes = afterScan.filter((target) => ids.includes(target.id)).reduce((sum, target) => sum + target.estimatedBytes, 0)
-    return { beforeBytes, afterBytes, savedBytes: Math.max(0, beforeBytes - afterBytes), logs }
+    const afterTargets = await this.buildCleanTargets(definitions)
+    const afterBytes = afterTargets.reduce((sum, target) => sum + target.estimatedBytes, 0)
+    return { beforeBytes, afterBytes, savedBytes: Math.max(0, beforeBytes - afterBytes), logs, targets: afterTargets }
   }
 
   async queryNvidiaState(): Promise<NvidiaState> {
@@ -631,8 +635,8 @@ export class OptimizerService {
       `$targetsJson = @'\n${json}\n'@`,
       '$targets = $targetsJson | ConvertFrom-Json',
       '$result = @{}',
-      '$maxFilesPerTarget = 60000',
-      '$maxMsPerTarget = 2500',
+      '$maxFilesPerTarget = 12000',
+      '$maxMsPerTarget = 650',
       'foreach ($target in $targets) {',
       '  $timer = [System.Diagnostics.Stopwatch]::StartNew()',
       '  [int64]$total = 0',
@@ -1168,12 +1172,29 @@ function safeDeleteScript(paths: string[]): string {
   return [
     `$pathsJson = @'\n${json}\n'@`,
     '$paths = $pathsJson | ConvertFrom-Json',
+    '[int64]$bytes = 0',
+    '[int]$deleted = 0',
+    '[int]$failed = 0',
     'foreach ($p in $paths) {',
-    '  if (Test-Path -Path $p) {',
-    '    Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue',
+    '  $items = @()',
+    '  try { $items = @(Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) } catch {}',
+    '  foreach ($item in $items) {',
+    '    try {',
+    '      $size = [int64]$item.Length',
+    '      Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop',
+    '      $bytes += $size',
+    '      $deleted++',
+    '    } catch {',
+    '      $failed++',
+    '    }',
     '  }',
+    '  try {',
+    '    Get-ChildItem -Path $p -Force -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object {',
+    '      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {}',
+    '    }',
+    '  } catch {}',
     '}',
-    '"Deleted candidates: $($paths.Count)"'
+    '[pscustomobject]@{ paths = @($paths).Count; deletedFiles = $deleted; failedFiles = $failed; deletedBytes = $bytes } | ConvertTo-Json -Compress'
   ].join('\n')
 }
 

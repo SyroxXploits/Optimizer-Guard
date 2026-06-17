@@ -528,8 +528,14 @@ function CleaningPanel({
       assertLogsSuccess(cleaned.logs)
       return cleaned
     }, 'Cleanup finished and logged.')
-    if (result) setNotice(`Cleaned ${formatBytes(result.beforeBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
-    await scan()
+    if (result) {
+      if (result.targets) {
+        const refreshed = new Map(result.targets.map((target) => [target.id, target]))
+        setTargets((current) => current.map((target) => refreshed.get(target.id) ?? target))
+        setSelected(new Set(result.targets.filter((target) => selected.has(target.id) && target.detected).map((target) => target.id)))
+      }
+      setNotice(`Cleanup finished. Estimated remaining selected data: ${formatBytes(result.afterBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
+    }
   }
 
   return (
@@ -1075,7 +1081,7 @@ function mhzLabel(value: number | null): string {
 function cleanSizeLabel(target: CleanTarget): string {
   if (target.commandOnly) return 'Command'
   if (!target.detected || target.estimatedBytes <= 0) return 'No files found'
-  return formatBytes(target.estimatedBytes)
+  return `${target.scanNote ? '~' : ''}${formatBytes(target.estimatedBytes)}`
 }
 
 function uniqueOptions(options: string[]): string[] {
