@@ -108,6 +108,7 @@ export interface CleanTarget {
   requiresAdmin: boolean
   dangerous: boolean
   commandOnly?: boolean
+  scanNote?: string
 }
 
 export interface CleanResult {

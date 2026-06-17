@@ -568,6 +568,7 @@ function CleaningPanel({
               <strong>{target.label}</strong>
               <p>{target.description}</p>
               <span className="muted">{cleanSizeLabel(target)}</span>
+              {target.scanNote && <span className="muted">{target.scanNote}</span>}
               {target.requiresAdmin && (
                 <span className="pill warn">
                   <Shield size={13} />

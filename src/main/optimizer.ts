@@ -18,6 +18,12 @@ import type {
   SystemInfo
 } from '../shared/types'
 
+interface CleanEstimate {
+  bytes: number
+  partial: boolean
+  files: number
+}
+
 interface CommandOptions {
   kind: CommandLogEntry['kind']
   label: string
@@ -337,11 +343,13 @@ export class OptimizerService {
     const targets = this.getCleanDefinitions()
     const estimates = await this.estimateTargets(targets.filter((target) => !target.commandOnly))
     return targets.map((target) => {
-      const estimatedBytes = target.commandOnly ? 0 : estimates[target.id] ?? 0
+      const estimate = estimates[target.id]
+      const estimatedBytes = target.commandOnly ? 0 : estimate?.bytes ?? 0
       return {
         ...target,
         estimatedBytes,
-        detected: target.commandOnly ? true : estimatedBytes > 0
+        detected: target.commandOnly ? true : estimatedBytes > 0 || Boolean(estimate?.partial),
+        scanNote: estimate?.partial ? `Fast scan capped after ${estimate.files.toLocaleString()} files. Size is approximate.` : undefined
       }
     })
   }
@@ -603,24 +611,47 @@ export class OptimizerService {
     ]
   }
 
-  private async estimateTargets(targets: CleanTarget[]): Promise<Record<string, number>> {
+  private async estimateTargets(targets: CleanTarget[]): Promise<Record<string, CleanEstimate>> {
     const json = JSON.stringify(targets.map((target) => ({ id: target.id, paths: target.paths.map(expandEnv) })))
     const script = [
       `$targetsJson = @'\n${json}\n'@`,
       '$targets = $targetsJson | ConvertFrom-Json',
       '$result = @{}',
+      '$maxFilesPerTarget = 60000',
+      '$maxMsPerTarget = 2500',
       'foreach ($target in $targets) {',
-      '  $total = 0',
+      '  $timer = [System.Diagnostics.Stopwatch]::StartNew()',
+      '  [int64]$total = 0',
+      '  [int]$files = 0',
+      '  [bool]$partial = $false',
       '  foreach ($p in $target.paths) {',
-      '    Get-ChildItem -Path $p -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { if (-not $_.PSIsContainer) { $total += $_.Length } }',
+      '    if ($timer.ElapsedMilliseconds -gt $maxMsPerTarget -or $files -ge $maxFilesPerTarget) { $partial = $true; break }',
+      '    try {',
+      '      foreach ($item in Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) {',
+      '        $total += $item.Length',
+      '        $files++',
+      '        if ($timer.ElapsedMilliseconds -gt $maxMsPerTarget -or $files -ge $maxFilesPerTarget) { $partial = $true; break }',
+      '      }',
+      '    } catch {}',
+      '    if ($partial) { break }',
       '  }',
-      '  $result[$target.id] = $total',
+      '  $result[$target.id] = [pscustomobject]@{ bytes = $total; partial = $partial; files = $files }',
       '}',
       '$result | ConvertTo-Json -Compress'
     ].join('\n')
     const result = await this.runPowerShell(script, { kind: 'clean', label: 'Estimate cleanup target sizes' })
     try {
-      return JSON.parse(result.stdout.trim()) as Record<string, number>
+      const raw = JSON.parse(result.stdout.trim()) as Record<string, { bytes?: number; partial?: boolean; files?: number }>
+      return Object.fromEntries(
+        Object.entries(raw).map(([id, estimate]) => [
+          id,
+          {
+            bytes: Number(estimate.bytes ?? 0),
+            partial: Boolean(estimate.partial),
+            files: Number(estimate.files ?? 0)
+          }
+        ])
+      )
     } catch {
       return {}
     }
