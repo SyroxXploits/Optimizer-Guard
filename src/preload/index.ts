@@ -82,6 +82,7 @@ const demoApi = {
       threads: 16,
       baseClockMhz: 4200,
       maxClockMhz: 5050,
+      currentClockMhz: 4850,
       usagePercent: 18,
       perCoreUsage: [12, 18, 8, 27, 33, 15, 10, 22, 14, 21, 9, 31, 18, 16, 12, 20],
       overclockNote: 'AMD Ryzen desktop chips are often unlocked; motherboard/BIOS support matters.'
@@ -92,6 +93,9 @@ const demoApi = {
       driverVersion: '610.47',
       usagePercent: 34,
       temperatureC: 58,
+      graphicsClockMhz: 2745,
+      memoryClockMhz: 10501,
+      maxGraphicsClockMhz: 2820,
       resizableBar: 'Enabled',
       frameGeneration: 'Supported'
     },
@@ -266,30 +270,41 @@ const demoApi = {
         label: 'Patch NVIDIA App recommendation resolution',
         description: 'Backs up NVIDIA App metadata and replaces 3840x2160 recommendations with 2560x1440 where safe.',
         requiresAdmin: false,
-        dangerous: false
+        dangerous: false,
+        status: '3 files already target 2560x1440, no 4K entries found.'
       },
       {
         id: 'disable-overlay',
         label: 'Disable NVIDIA overlay',
         description: 'Turns off common NVIDIA Share/In-game overlay flags.',
         requiresAdmin: false,
-        dangerous: false
+        dangerous: false,
+        status: 'Overlay registry flags are already disabled.'
       },
       {
         id: 'game-mode',
         label: 'Enable Game Mode',
         description: 'Enables Windows Game Mode for foreground game prioritization.',
         requiresAdmin: false,
-        dangerous: false
+        dangerous: false,
+        status: 'Game Mode is enabled.'
       },
       {
         id: 'disable-game-dvr',
         label: 'Disable Xbox Game DVR capture',
         description: 'Disables background recording/Game DVR registry flags.',
         requiresAdmin: false,
-        dangerous: false
+        dangerous: false,
+        status: 'Game DVR capture is disabled.'
       }
-    ]
+    ],
+    patchStatus: {
+      checked: true,
+      targetResolution: '2560x1440',
+      patchedFiles: 3,
+      unpatched4kFiles: 0,
+      folderFound: true
+    }
   }),
   applyNvidiaProfile: async () => demoSnapshot.logs,
   restore: async () => demoSnapshot.logs[0]

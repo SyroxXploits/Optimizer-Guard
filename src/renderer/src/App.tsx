@@ -314,9 +314,10 @@ function TaskDisabler({
             </div>
             <div className="feature-actions">
               <strong>{feature.state}</strong>
-              {feature.state.toLowerCase() === 'enabled' && <button onClick={() => void toggleFeature(feature, false)}>Disable</button>}
-              {feature.state.toLowerCase() === 'disabled' && <button onClick={() => void toggleFeature(feature, true)}>Enable</button>}
-              {!['enabled', 'disabled'].includes(feature.state.toLowerCase()) && (
+              {feature.state.toLowerCase().includes('admin') && <small>State needs UAC to read. Actions still work.</small>}
+              {isFeatureEnabled(feature.state) && <button onClick={() => void toggleFeature(feature, false)}>Disable</button>}
+              {isFeatureDisabled(feature.state) && <button onClick={() => void toggleFeature(feature, true)}>Enable</button>}
+              {!isFeatureEnabled(feature.state) && !isFeatureDisabled(feature.state) && (
                 <>
                   <button onClick={() => void toggleFeature(feature, false)}>Disable</button>
                   <button onClick={() => void toggleFeature(feature, true)}>Enable</button>
@@ -406,6 +407,7 @@ function SystemPanel({
           <div className="cards-grid">
             <MetricCard icon={<Info />} label="BIOS" value={`${info.biosVendor} ${info.biosVersion}`} sub={info.biosDate} />
             <MetricCard icon={<HardDrive />} label="Motherboard" value={info.motherboardManufacturer} sub={info.motherboardModel} />
+            <MetricCard icon={<DatabaseBackup />} label="Memory" value={info.memoryGb ? `${info.memoryGb} GB RAM` : 'Unknown RAM'} sub={`${info.cpu.cores} cores / ${info.cpu.threads} threads`} />
             <MetricCard icon={<Activity />} label="Power plan" value={info.powerPlan.replace('Power Scheme GUID:', '').trim()} sub={`Admin: ${info.isAdmin ? 'yes' : 'no'}`} />
             <MetricCard icon={<AppWindow />} label="Windows gaming" value={`Game Mode ${info.gameMode}`} sub={`HAGS ${info.hags}`} />
           </div>
@@ -416,7 +418,8 @@ function SystemPanel({
               <div className="spec-list">
                 <Spec label="Name" value={info.cpu.name} />
                 <Spec label="Cores / Threads" value={`${info.cpu.cores} / ${info.cpu.threads}`} />
-                <Spec label="Clock" value={`${info.cpu.baseClockMhz ?? '?'} MHz base, ${info.cpu.maxClockMhz ?? '?'} MHz max`} />
+                <Spec label="Current clock" value={mhzLabel(info.cpu.currentClockMhz)} />
+                <Spec label="Base / Max clock" value={`${mhzLabel(info.cpu.baseClockMhz)} / ${mhzLabel(info.cpu.maxClockMhz)}`} />
                 <Spec label="Usage" value={`${info.cpu.usagePercent ?? 0}%`} />
                 <Spec label="OC hint" value={info.cpu.overclockNote} />
               </div>
@@ -442,6 +445,9 @@ function SystemPanel({
                 <Spec label="Driver" value={info.gpu.driverVersion} />
                 <Spec label="Usage" value={info.gpu.usagePercent !== null ? `${info.gpu.usagePercent}%` : 'Unknown'} />
                 <Spec label="Temp" value={info.gpu.temperatureC !== null ? `${info.gpu.temperatureC} C` : 'Unknown'} />
+                <Spec label="GPU clock" value={mhzLabel(info.gpu.graphicsClockMhz)} />
+                <Spec label="Memory clock" value={mhzLabel(info.gpu.memoryClockMhz)} />
+                <Spec label="Max GPU clock" value={mhzLabel(info.gpu.maxGraphicsClockMhz)} />
                 <Spec label="Resizable BAR" value={info.gpu.resizableBar} />
                 <Spec label="Frame Generation" value={info.gpu.frameGeneration} />
               </div>
@@ -458,7 +464,7 @@ function SystemPanel({
                   <strong>
                     {display.width}x{display.height}
                   </strong>
-                  <span>{display.refreshRate || '?'} Hz</span>
+                  <span>{display.refreshRate ? `${display.refreshRate} Hz` : 'Refresh rate unknown'}</span>
                   {display.primary && <span className="pill live">Primary</span>}
                 </div>
               ))}
@@ -702,6 +708,7 @@ function NvidiaPanel({
               <Spec label="Driver" value={profile.driverVersion} />
               <Spec label="Detected resolution" value={profile.detectedResolution} />
               <Spec label="Target resolution" value={profile.preferredResolution} />
+              <Spec label="Patch scan" value={`${state?.patchStatus.patchedFiles ?? 0} patched / ${state?.patchStatus.unpatched4kFiles ?? 0} still 4K`} />
             </div>
             {state?.actions.map((action) => {
               const key = action.id === 'patch-nvidia-resolution' ? 'patchNvidiaAppResolution' : action.id === 'disable-overlay' ? 'disableOverlay' : action.id === 'game-mode' ? 'setGameMode' : 'disableGameDvr'
@@ -711,6 +718,7 @@ function NvidiaPanel({
                   <span>
                     <strong>{action.label}</strong>
                     <small>{action.description}</small>
+                    <small className="action-status">{action.status}</small>
                   </span>
                   {action.requiresAdmin && <Shield size={15} />}
                 </label>
@@ -778,10 +786,10 @@ function LogsPanel({
             {(snapshot?.restoreHistory ?? []).map((entry) => (
               <div className="restore-item" key={entry.id}>
                 <div>
-                  <strong>{entry.label}</strong>
+                  <strong>{restoreDisplayLabel(entry.label)}</strong>
                   <span>{new Date(entry.timestamp).toLocaleString()}</span>
                 </div>
-                <span className={entry.applied ? 'pill' : 'pill live'}>{entry.applied ? 'used' : 'ready'}</span>
+                <span className={entry.applied ? 'pill' : 'pill live'}>{entry.applied ? 'used' : 'available'}</span>
                 {entry.elevated && (
                   <span className="pill warn">
                     <Shield size={13} />
@@ -1024,6 +1032,19 @@ function assertLogsSuccess(logs: CommandLogEntry[]): void {
   if (failed) assertCommandSuccess(failed)
 }
 
+function restoreDisplayLabel(label: string): string {
+  if (label.toLowerCase().startsWith('undo:')) return label
+  return `Undo previous change: ${label.charAt(0).toLowerCase()}${label.slice(1)}`
+}
+
+function isFeatureEnabled(state: string): boolean {
+  return state.toLowerCase().startsWith('enabled')
+}
+
+function isFeatureDisabled(state: string): boolean {
+  return state.toLowerCase().startsWith('disabled')
+}
+
 function formatBytes(bytes: number): string {
   if (!bytes) return '0 bytes'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -1034,6 +1055,10 @@ function formatBytes(bytes: number): string {
     index += 1
   }
   return `${value.toFixed(index < 2 ? 0 : 2)} ${units[index]}`
+}
+
+function mhzLabel(value: number | null): string {
+  return value ? `${value} MHz` : 'Unknown'
 }
 
 function cleanSizeLabel(target: CleanTarget): string {

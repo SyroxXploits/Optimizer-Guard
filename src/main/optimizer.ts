@@ -137,28 +137,60 @@ export class OptimizerService {
 
   async setTaskState(taskPath: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> {
     const args = ['/Change', '/TN', taskPath, enable ? '/Enable' : '/Disable']
-    const log = await this.runCommand('schtasks.exe', args, {
+    if (!enable) {
+      await this.runCommand('schtasks.exe', ['/End', '/TN', taskPath], {
+        kind: 'task',
+        label: `Stop running scheduled task ${taskPath}`,
+        dryRun
+      })
+    }
+
+    let log = await this.runCommand('schtasks.exe', args, {
       kind: 'task',
       label: `${enable ? 'Enable' : 'Disable'} scheduled task ${taskPath}`,
       dryRun
     })
+
+    if (!log.success || !(await this.verifyTaskState(taskPath, enable))) {
+      const elevatedScript = taskStateScript(taskPath, enable)
+      log = await this.runElevatedPowerShell(elevatedScript, `${enable ? 'Enable' : 'Disable'} scheduled task ${taskPath}`, dryRun, 'task')
+    }
+
+    if (log.success && !(await this.verifyTaskState(taskPath, enable))) {
+      log = this.addLog({
+        kind: 'task',
+        label: `Verify scheduled task ${taskPath}`,
+        command: 'schtasks.exe',
+        args: ['/query', '/TN', taskPath, '/fo', 'CSV', '/v'],
+        stdout: `Expected task to be ${enable ? 'enabled' : 'disabled'}, but Windows reported a different state.`,
+        stderr: '',
+        exitCode: 1,
+        success: false,
+        dryRun: false,
+        elevated: log.elevated
+      })
+    }
+
     if (log.success && !dryRun) {
       this.addRestore({
         kind: 'task',
-        label: `${enable ? 'Re-disable' : 'Re-enable'} ${taskPath}`,
+        label: `Undo: ${enable ? 'disable' : 're-enable'} ${taskPath}`,
         command: 'schtasks.exe',
         args: ['/Change', '/TN', taskPath, enable ? '/Disable' : '/Enable'],
-        elevated: false
+        elevated: log.elevated
       })
     }
     return log
   }
 
+  private async verifyTaskState(taskPath: string, enabled: boolean): Promise<boolean> {
+    const tasks = await this.queryTasks()
+    const task = tasks.find((item) => item.path.toLowerCase() === taskPath.toLowerCase())
+    return task ? task.enabled === enabled : false
+  }
+
   async queryFeatures(): Promise<FeatureToggle[]> {
-    const script = [
-      "$f = Get-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -ErrorAction SilentlyContinue",
-      "if ($null -eq $f) { 'Unknown' } else { $f.State }"
-    ].join('; ')
+    const script = hyperVStateScript()
     const result = await this.runPowerShell(script, { kind: 'system', label: 'Query Hyper-V optional feature' })
     const state = result.stdout.trim() || 'Unknown'
     return [
@@ -180,7 +212,7 @@ export class OptimizerService {
     if (log.success && !dryRun) {
       this.addRestore({
         kind: 'feature',
-        label: `${enable ? 'Disable' : 'Enable'} ${featureName}`,
+        label: `Undo: ${enable ? 'disable' : 're-enable'} ${featureName}`,
         command: 'powershell.exe',
         args: [
           '-NoProfile',
@@ -220,6 +252,7 @@ export class OptimizerService {
         threads: Number(cim?.cpu?.NumberOfLogicalProcessors ?? os.cpus().length),
         baseClockMhz: numberOrNull(cim?.cpu?.CurrentClockSpeed),
         maxClockMhz: numberOrNull(cim?.cpu?.MaxClockSpeed),
+        currentClockMhz: numberOrNull(cim?.cpu?.CurrentClockSpeed),
         usagePercent: numberOrNull(cim?.cpuLoad),
         perCoreUsage: perCore,
         overclockNote: detectOverclockable(cpuName, String(cim?.board?.Manufacturer ?? ''))
@@ -230,13 +263,16 @@ export class OptimizerService {
         driverVersion: gpu.driverVersion || String(cim?.gpu?.DriverVersion ?? 'Unknown'),
         usagePercent: gpu.usagePercent,
         temperatureC: gpu.temperatureC,
+        graphicsClockMhz: gpu.graphicsClockMhz,
+        memoryClockMhz: gpu.memoryClockMhz,
+        maxGraphicsClockMhz: gpu.maxGraphicsClockMhz,
         resizableBar: resizable,
         frameGeneration: detectFrameGeneration(gpu.name || String(cim?.gpu?.Name ?? ''))
       },
       displays,
       powerPlan: String(cim?.powerPlan ?? 'Unknown'),
       gameMode: registryDwordToState(cim?.gameMode),
-      hags: registryDwordToState(cim?.hags)
+      hags: hagsStateFromRegistry(cim?.hags)
     }
   }
 
@@ -282,8 +318,9 @@ export class OptimizerService {
     const width = primary?.width || 2560
     const height = primary?.height || 1440
     const detectedResolution = `${width}x${height}`
-    const preferredResolution = detectedResolution
-    const profile: NvidiaProfile = {
+    const savedProfile = this.settings.nvidiaProfile ?? {}
+    const preferredResolution = savedProfile.preferredResolution || this.settings.preferredResolution || detectedResolution
+    const recommendedProfile: NvidiaProfile = {
       gpuName: system.gpu.name,
       driverVersion: system.gpu.driverVersion,
       detectedResolution,
@@ -299,6 +336,16 @@ export class OptimizerService {
         'Preset letters are suggestions for tools such as NVIDIA Profile Inspector; the app will not force-edit game files.'
       ]
     }
+    const profile: NvidiaProfile = {
+      ...recommendedProfile,
+      ...savedProfile,
+      gpuName: system.gpu.name,
+      driverVersion: system.gpu.driverVersion,
+      detectedResolution,
+      preferredResolution
+    }
+    const patchStatus = await this.inspectNvidiaPatchStatus(preferredResolution)
+    const tweakState = await this.queryGamingTweaksState()
     return {
       profile,
       actions: [
@@ -307,35 +354,46 @@ export class OptimizerService {
           label: 'Patch NVIDIA App recommendation resolution',
           description: 'Backs up NVIDIA App game metadata and replaces 3840x2160 recommendations with your preferred resolution where safe.',
           requiresAdmin: false,
-          dangerous: false
+          dangerous: false,
+          status: patchStatus.folderFound
+            ? patchStatus.unpatched4kFiles > 0
+              ? `${patchStatus.unpatched4kFiles} metadata files still contain 3840x2160.`
+              : patchStatus.patchedFiles > 0
+                ? `${patchStatus.patchedFiles} metadata files already target ${patchStatus.targetResolution}.`
+                : 'No NVIDIA App game metadata with resolution entries found.'
+            : 'NVIDIA App metadata folder was not found.'
         },
         {
           id: 'disable-overlay',
           label: 'Disable NVIDIA overlay',
           description: 'Turns off common NVIDIA Share/In-game overlay registry flags and stops overlay helper processes if they are running.',
           requiresAdmin: false,
-          dangerous: false
+          dangerous: false,
+          status: tweakState.overlayDisabled ? 'Overlay registry flags are already disabled.' : 'Overlay appears enabled or unset.'
         },
         {
           id: 'game-mode',
           label: 'Enable Game Mode',
           description: 'Enables Windows Game Mode for foreground game prioritization.',
           requiresAdmin: false,
-          dangerous: false
+          dangerous: false,
+          status: system.gameMode === 'Enabled' ? 'Game Mode is already enabled.' : `Game Mode is ${system.gameMode.toLowerCase()}.`
         },
         {
           id: 'disable-game-dvr',
           label: 'Disable Xbox Game DVR capture',
           description: 'Disables background recording/Game DVR registry flags. This is reversible from Windows settings.',
           requiresAdmin: false,
-          dangerous: false
+          dangerous: false,
+          status: tweakState.gameDvrDisabled ? 'Game DVR capture is already disabled.' : 'Game DVR capture appears enabled or unset.'
         }
-      ]
+      ],
+      patchStatus
     }
   }
 
   async applyNvidiaProfile(request: ApplyNvidiaProfileRequest, dryRun: boolean): Promise<CommandLogEntry[]> {
-    this.settings = { ...this.settings, preferredResolution: request.profile.preferredResolution }
+    this.settings = { ...this.settings, preferredResolution: request.profile.preferredResolution, nvidiaProfile: request.profile }
     this.writeJson(this.settingsFile, this.settings)
 
     const logs: CommandLogEntry[] = [
@@ -498,22 +556,34 @@ export class OptimizerService {
     }
   }
 
-  private async queryNvidiaQuery(): Promise<{ name: string; driverVersion: string; vramMb: number | null; usagePercent: number | null; temperatureC: number | null }> {
+  private async queryNvidiaQuery(): Promise<{
+    name: string
+    driverVersion: string
+    vramMb: number | null
+    usagePercent: number | null
+    temperatureC: number | null
+    graphicsClockMhz: number | null
+    memoryClockMhz: number | null
+    maxGraphicsClockMhz: number | null
+  }> {
     const result = await this.runCommand(
       'nvidia-smi.exe',
-      ['--query-gpu=name,driver_version,memory.total,utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'],
+      ['--query-gpu=name,driver_version,memory.total,utilization.gpu,temperature.gpu,clocks.current.graphics,clocks.current.memory,clocks.max.graphics', '--format=csv,noheader,nounits'],
       { kind: 'system', label: 'Query NVIDIA GPU via nvidia-smi' }
     )
     if (!result.success) {
-      return { name: '', driverVersion: '', vramMb: null, usagePercent: null, temperatureC: null }
+      return { name: '', driverVersion: '', vramMb: null, usagePercent: null, temperatureC: null, graphicsClockMhz: null, memoryClockMhz: null, maxGraphicsClockMhz: null }
     }
-    const [name, driverVersion, vram, usage, temp] = result.stdout.trim().split(',').map((item) => item.trim())
+    const [name, driverVersion, vram, usage, temp, graphicsClock, memoryClock, maxGraphicsClock] = result.stdout.trim().split(',').map((item) => item.trim())
     return {
       name,
       driverVersion,
       vramMb: Number(vram) || null,
       usagePercent: Number(usage) || null,
-      temperatureC: Number(temp) || null
+      temperatureC: Number(temp) || null,
+      graphicsClockMhz: Number(graphicsClock) || null,
+      memoryClockMhz: Number(memoryClock) || null,
+      maxGraphicsClockMhz: Number(maxGraphicsClock) || null
     }
   }
 
@@ -521,7 +591,37 @@ export class OptimizerService {
     const result = await this.runCommand('nvidia-smi.exe', ['-q'], { kind: 'system', label: 'Query NVIDIA Resizable BAR' })
     if (!result.success) return 'Unknown'
     const match = result.stdout.match(/Resizable BAR\s*:\s*(Enabled|Disabled)/i)
-    return match ? (match[1] as 'Enabled' | 'Disabled') : 'Unknown'
+    if (match) return match[1] as 'Enabled' | 'Disabled'
+    const bar1 = result.stdout.match(/BAR1 Memory Usage[\s\S]*?Total\s*:\s*(\d+)\s*MiB/i)
+    if (bar1) return Number(bar1[1]) > 1024 ? 'Enabled' : 'Disabled'
+    return 'Unknown'
+  }
+
+  private async inspectNvidiaPatchStatus(preferredResolution: string): Promise<NvidiaState['patchStatus']> {
+    const [width, height] = preferredResolution.split('x').map((part) => Number(part) || 0)
+    const script = inspectNvidiaPatchStatusScript(width || 2560, height || 1440)
+    const result = await this.runPowerShell(script, { kind: 'nvidia', label: 'Inspect NVIDIA App recommendation resolution metadata' })
+    try {
+      return JSON.parse(result.stdout.trim()) as NvidiaState['patchStatus']
+    } catch {
+      return { checked: false, targetResolution: preferredResolution, patchedFiles: 0, unpatched4kFiles: 0, folderFound: false }
+    }
+  }
+
+  private async queryGamingTweaksState(): Promise<{ overlayDisabled: boolean; gameDvrDisabled: boolean }> {
+    const script = [
+      "$overlay = Get-ItemPropertyValue -Path 'HKCU:\\Software\\NVIDIA Corporation\\Global\\ShadowPlay' -Name 'EnableInGameOverlay' -ErrorAction SilentlyContinue",
+      "$shadow = Get-ItemPropertyValue -Path 'HKCU:\\Software\\NVIDIA Corporation\\Global\\ShadowPlay' -Name 'ShadowPlayEnabled' -ErrorAction SilentlyContinue",
+      "$dvr = Get-ItemPropertyValue -Path 'HKCU:\\System\\GameConfigStore' -Name 'GameDVR_Enabled' -ErrorAction SilentlyContinue",
+      "$capture = Get-ItemPropertyValue -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR' -Name 'AppCaptureEnabled' -ErrorAction SilentlyContinue",
+      "[pscustomobject]@{ overlayDisabled = (($overlay -eq 0 -or $null -eq $overlay) -and ($shadow -eq 0 -or $null -eq $shadow)); gameDvrDisabled = (($dvr -eq 0 -or $null -eq $dvr) -and ($capture -eq 0 -or $null -eq $capture)) } | ConvertTo-Json -Compress"
+    ].join('\n')
+    const result = await this.runPowerShell(script, { kind: 'nvidia', label: 'Inspect Windows/NVIDIA gaming tweak state' })
+    try {
+      return JSON.parse(result.stdout.trim()) as { overlayDisabled: boolean; gameDvrDisabled: boolean }
+    } catch {
+      return { overlayDisabled: false, gameDvrDisabled: false }
+    }
   }
 
   private async queryPerCoreUsage(): Promise<number[]> {
@@ -836,8 +936,30 @@ $gpu = Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descendin
 $displays = @()
 try {
   Add-Type -AssemblyName System.Windows.Forms
+  Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DisplayModeReader {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+  public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+    public short dmSpecVersion; public short dmDriverVersion; public short dmSize; public short dmDriverExtra;
+    public int dmFields; public int dmPositionX; public int dmPositionY; public int dmDisplayOrientation; public int dmDisplayFixedOutput;
+    public short dmColor; public short dmDuplex; public short dmYResolution; public short dmTTOption; public short dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+    public short dmLogPixels; public int dmBitsPerPel; public int dmPelsWidth; public int dmPelsHeight;
+    public int dmDisplayFlags; public int dmDisplayFrequency; public int dmICMMethod; public int dmICMIntent;
+    public int dmMediaType; public int dmDitherType; public int dmReserved1; public int dmReserved2;
+    public int dmPanningWidth; public int dmPanningHeight;
+  }
+  [DllImport("user32.dll", CharSet = CharSet.Ansi)] public static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+}
+"@ -ErrorAction SilentlyContinue
   $displays = [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
-    [pscustomobject]@{ name = $_.DeviceName; width = $_.Bounds.Width; height = $_.Bounds.Height; refreshRate = 0; primary = $_.Primary }
+    $mode = New-Object DisplayModeReader+DEVMODE
+    $mode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mode)
+    [void][DisplayModeReader]::EnumDisplaySettings($_.DeviceName, -1, [ref]$mode)
+    [pscustomobject]@{ name = $_.DeviceName; width = $_.Bounds.Width; height = $_.Bounds.Height; refreshRate = $mode.dmDisplayFrequency; primary = $_.Primary }
   }
 } catch {
   $displays = Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorListedSupportedSourceModes -ErrorAction SilentlyContinue |
@@ -849,6 +971,7 @@ try {
 $powerPlan = (powercfg /getactivescheme) -join ' '
 $gameMode = Get-ItemPropertyValue -Path 'HKCU:\\Software\\Microsoft\\GameBar' -Name 'AutoGameModeEnabled' -ErrorAction SilentlyContinue
 $hags = Get-ItemPropertyValue -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' -Name 'HwSchMode' -ErrorAction SilentlyContinue
+if ($null -eq $hags) { $hags = 'Default' }
 $memoryGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
 $cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
 [pscustomobject]@{
@@ -863,6 +986,62 @@ $cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPerce
   memoryGb = $memoryGb
   cpuLoad = $cpuLoad
 }`
+}
+
+function taskStateScript(taskPath: string, enable: boolean): string {
+  const task = escapePowerShellSingle(taskPath)
+  const switchName = enable ? '/Enable' : '/Disable'
+  const expected = enable ? 'Enabled' : 'Disabled'
+  return `
+$tn = '${task}'
+$output = ''
+if ('${enable ? '1' : '0'}' -eq '0') {
+  $output += (schtasks.exe /End /TN $tn 2>&1 | Out-String)
+}
+$output += (schtasks.exe /Change /TN $tn ${switchName} 2>&1 | Out-String)
+$csv = schtasks.exe /Query /TN $tn /FO CSV /V 2>&1
+if ($LASTEXITCODE -ne 0) { $output += ($csv | Out-String); $output; exit 1 }
+$rows = $csv | ConvertFrom-Csv
+$state = @($rows)[0].'Scheduled Task State'
+$output += "Scheduled Task State: $state"
+$output
+if ($state -ne '${expected}') { exit 1 }
+`
+}
+
+function hyperVStateScript(): string {
+  return `
+$featureState = 'Unknown'
+$featureText = ''
+try {
+  $feature = Get-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -ErrorAction Stop 2>&1
+  if ($feature.State) {
+    $featureState = [string]$feature.State
+  } else {
+    $featureText = ($feature | Out-String)
+  }
+} catch {
+  $featureText = $_.Exception.Message
+}
+if ($featureText -match 'requires elevation|Access is denied|administrator|740') {
+  $featureState = 'Admin required'
+}
+$hypervisorPresent = $false
+try {
+  $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+  $hypervisorPresent = [bool]$computer.HypervisorPresent
+} catch {}
+
+if ($featureState -eq 'Enabled') {
+  if ($hypervisorPresent) { 'Enabled (active)' } else { 'Enabled (restart may be pending)' }
+} elseif ($featureState -eq 'Disabled') {
+  if ($hypervisorPresent) { 'Disabled (restart pending; hypervisor still active)' } else { 'Disabled' }
+} elseif ($featureState -eq 'Admin required') {
+  if ($hypervisorPresent) { 'Admin required; hypervisor active' } else { 'Admin required; hypervisor not active' }
+} else {
+  if ($hypervisorPresent) { 'Unknown; hypervisor active' } else { 'Unknown' }
+}
+`
 }
 
 function normalizeDisplay(value: any) {
@@ -903,6 +1082,24 @@ Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Gam
 `
 }
 
+function inspectNvidiaPatchStatusScript(width: number, height: number): string {
+  return `
+$root = Join-Path $env:LOCALAPPDATA 'NVIDIA Corporation\\NVIDIA app\\NvBackend'
+$target = '${width}x${height}'
+$status = [ordered]@{ checked = $true; targetResolution = $target; patchedFiles = 0; unpatched4kFiles = 0; folderFound = (Test-Path -LiteralPath $root) }
+if ($status.folderFound) {
+  $files = Get-ChildItem -LiteralPath $root -Recurse -File -Include *.json,*.txt,*.dat -ErrorAction SilentlyContinue
+  foreach ($file in $files) {
+    $text = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $text) { continue }
+    if ($text -match '3840\\s*x\\s*2160' -or $text -match '"width"\\s*:\\s*3840' -or $text -match '"height"\\s*:\\s*2160') { $status.unpatched4kFiles++ }
+    if ($text -match [regex]::Escape($target) -or ($text -match ('"width"\\s*:\\s*' + ${width}) -and $text -match ('"height"\\s*:\\s*' + ${height}))) { $status.patchedFiles++ }
+  }
+}
+[pscustomobject]$status | ConvertTo-Json -Compress
+`
+}
+
 function patchNvidiaResolutionScript(width: number, height: number, backupRoot: string): string {
   return `
 $root = Join-Path $env:LOCALAPPDATA 'NVIDIA Corporation\\NVIDIA app\\NvBackend'
@@ -928,6 +1125,14 @@ foreach ($file in $files) {
 function registryDwordToState(value: unknown): 'Enabled' | 'Disabled' | 'Unknown' {
   if (value === null || value === undefined || value === '') return 'Unknown'
   return Number(value) > 0 ? 'Enabled' : 'Disabled'
+}
+
+function hagsStateFromRegistry(value: unknown): 'Enabled' | 'Disabled' | 'Default' | 'Unknown' {
+  if (value === 'Default') return 'Default'
+  if (value === null || value === undefined || value === '') return 'Default'
+  if (Number(value) === 2) return 'Enabled'
+  if (Number(value) === 1) return 'Disabled'
+  return 'Unknown'
 }
 
 function recommendDlss(width: number, height: number): NvidiaProfile['dlssMode'] {

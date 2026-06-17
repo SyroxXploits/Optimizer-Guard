@@ -107,7 +107,7 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
     })()
   `)
   await check('features query', "window.optimizerGuard.queryFeatures().then((features) => features.map((feature) => ({ id: feature.id, state: feature.state })))")
-  await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, gpu: info.gpu.name, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
+  await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, cpuClock: info.cpu.currentClockMhz, gpu: info.gpu.name, gpuClock: info.gpu.graphicsClockMhz, memoryGb: info.memoryGb, resizableBar: info.gpu.resizableBar, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
   await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")
   await check('nvidia detection', "window.optimizerGuard.getNvidiaState().then((state) => ({ gpu: state.profile.gpuName, detectedResolution: state.profile.detectedResolution, preferredResolution: state.profile.preferredResolution, dlssMode: state.profile.dlssMode }))")
   await check('update checker', "window.optimizerGuard.checkForUpdates().then((update) => ({ currentVersion: update.currentVersion, latestVersion: update.latestVersion, error: update.error || '' }))")

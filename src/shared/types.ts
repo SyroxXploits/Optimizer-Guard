@@ -54,6 +54,7 @@ export interface CpuInfo {
   threads: number
   baseClockMhz: number | null
   maxClockMhz: number | null
+  currentClockMhz: number | null
   usagePercent: number | null
   perCoreUsage: number[]
   overclockNote: string
@@ -65,6 +66,9 @@ export interface GpuInfo {
   driverVersion: string
   usagePercent: number | null
   temperatureC: number | null
+  graphicsClockMhz: number | null
+  memoryClockMhz: number | null
+  maxGraphicsClockMhz: number | null
   resizableBar: 'Enabled' | 'Disabled' | 'Unknown'
   frameGeneration: 'Supported' | 'Not supported' | 'Unknown'
 }
@@ -90,7 +94,7 @@ export interface SystemInfo {
   memoryGb: number | null
   powerPlan: string
   gameMode: 'Enabled' | 'Disabled' | 'Unknown'
-  hags: 'Enabled' | 'Disabled' | 'Unknown'
+  hags: 'Enabled' | 'Disabled' | 'Default' | 'Unknown'
 }
 
 export interface CleanTarget {
@@ -132,11 +136,19 @@ export interface NvidiaAction {
   description: string
   requiresAdmin: boolean
   dangerous: boolean
+  status: string
 }
 
 export interface NvidiaState {
   profile: NvidiaProfile
   actions: NvidiaAction[]
+  patchStatus: {
+    checked: boolean
+    targetResolution: string
+    patchedFiles: number
+    unpatched4kFiles: number
+    folderFound: boolean
+  }
 }
 
 export interface ApplyNvidiaProfileRequest {
@@ -150,6 +162,7 @@ export interface ApplyNvidiaProfileRequest {
 export interface AppSettings {
   preferredResolution: string
   lastTab: string
+  nvidiaProfile?: Partial<NvidiaProfile>
 }
 
 export interface AppSnapshot {
