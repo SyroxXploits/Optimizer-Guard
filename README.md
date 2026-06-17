@@ -32,6 +32,10 @@ Scan your system, review suggested optimizations, apply only what you choose, an
 
 ![Logs / Restore](docs/screenshots/logs-restore.png)
 
+### About / Updates
+
+![About / Updates](docs/screenshots/about-updates.png)
+
 ---
 
 ## Features

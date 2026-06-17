@@ -158,3 +158,13 @@ export interface AppSnapshot {
   logs: CommandLogEntry[]
   restoreHistory: RestoreEntry[]
 }
+
+export interface UpdateCheckResult {
+  currentVersion: string
+  latestVersion: string
+  releaseName: string
+  releaseUrl: string
+  publishedAt?: string
+  isUpdateAvailable: boolean
+  error?: string
+}

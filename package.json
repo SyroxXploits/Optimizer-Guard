@@ -4,7 +4,7 @@
   "description": "Guarded Windows gaming optimizer with task controls, cleanup, NVIDIA/DLSS suggestions, logs, and restore history",
   "main": "./out/main/index.js",
   "homepage": ".",
-  "author": "Syrox",
+  "author": "Optimizer Guard",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -50,7 +50,7 @@
   "build": {
     "appId": "com.syrox.optimizer.guard",
     "productName": "Optimizer Guard",
-    "copyright": "Copyright (c) 2026 Syrox. All rights reserved.",
+    "copyright": "Copyright (c) 2026 Optimizer Guard. All rights reserved.",
     "publish": [
       {
         "provider": "github",

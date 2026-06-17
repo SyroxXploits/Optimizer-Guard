@@ -10,11 +10,13 @@ import type {
   FeatureToggle,
   NvidiaState,
   ScheduledTaskRow,
-  SystemInfo
+  SystemInfo,
+  UpdateCheckResult
 } from '../../shared/types'
 
 interface OptimizerGuardApi {
   appVersion: () => Promise<string>
+  checkForUpdates: () => Promise<UpdateCheckResult>
   minimize: () => Promise<void>
   toggleMaximize: () => Promise<void>
   close: () => Promise<void>

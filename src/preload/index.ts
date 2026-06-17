@@ -9,7 +9,8 @@ import type {
   FeatureToggle,
   NvidiaState,
   ScheduledTaskRow,
-  SystemInfo
+  SystemInfo,
+  UpdateCheckResult
 } from '../shared/types'
 
 const demoSnapshot = {
@@ -46,6 +47,13 @@ const demoSnapshot = {
 
 const demoApi = {
   appVersion: async () => '1.0.0',
+  checkForUpdates: async () => ({
+    currentVersion: '1.0.0',
+    latestVersion: '1.0.0',
+    releaseName: 'Optimizer Guard v1.0.0',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.0.0',
+    isUpdateAvailable: false
+  }),
   minimize: async () => undefined,
   toggleMaximize: async () => undefined,
   close: async () => undefined,
@@ -245,6 +253,7 @@ const demoApi = {
 
 const optimizerGuard = process.env.OPTIMIZER_GUARD_DEMO === '1' ? demoApi : {
   appVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
+  checkForUpdates: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('app:check-updates'),
   minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggle-maximize'),
   close: (): Promise<void> => ipcRenderer.invoke('window:close'),

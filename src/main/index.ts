@@ -4,7 +4,10 @@ import { join } from 'path'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { OptimizerService } from './optimizer'
-import type { AppSettings, ApplyNvidiaProfileRequest } from '../shared/types'
+import type { AppSettings, ApplyNvidiaProfileRequest, UpdateCheckResult } from '../shared/types'
+
+const REPOSITORY = 'SyroxXploits/Optimizer-Guard'
+const RELEASES_URL = `https://github.com/${REPOSITORY}/releases/latest`
 
 let mainWindow: BrowserWindow | null = null
 const service = new OptimizerService()
@@ -56,7 +59,8 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
     { tab: 'System / BIOS Info', file: 'system-info.png' },
     { tab: 'Cleaning', file: 'cleaning.png', before: "document.querySelector('.primary')?.click()" },
     { tab: 'NVIDIA / DLSS Suggestions', file: 'nvidia-dlss.png' },
-    { tab: 'Logs / Restore', file: 'logs-restore.png' }
+    { tab: 'Logs / Restore', file: 'logs-restore.png' },
+    { tab: 'About / Updates', file: 'about-updates.png' }
   ]
 
   for (const shot of shots) {
@@ -81,6 +85,7 @@ function wait(ms: number): Promise<void> {
 
 function registerIpc(): void {
   ipcMain.handle('app:get-version', () => app.getVersion())
+  ipcMain.handle('app:check-updates', () => checkForUpdates())
   ipcMain.handle('window:minimize', () => mainWindow?.minimize())
   ipcMain.handle('window:toggle-maximize', () => {
     if (!mainWindow) return
@@ -117,6 +122,60 @@ function registerIpc(): void {
   )
 
   ipcMain.handle('restore:run', (_event, id: string, dryRun: boolean) => service.restore(id, dryRun))
+}
+
+async function checkForUpdates(): Promise<UpdateCheckResult> {
+  const currentVersion = app.getVersion()
+  try {
+    const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases/latest`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `Optimizer Guard/${currentVersion}`,
+        'X-GitHub-Api-Version': '2022-11-28'
+      }
+    })
+    if (!response.ok) {
+      throw new Error(`GitHub API returned HTTP ${response.status}`)
+    }
+    const release = (await response.json()) as {
+      tag_name?: string
+      name?: string
+      html_url?: string
+      published_at?: string
+    }
+    const latestVersion = normalizeVersion(release.tag_name ?? release.name ?? currentVersion)
+    return {
+      currentVersion,
+      latestVersion,
+      releaseName: release.name ?? release.tag_name ?? latestVersion,
+      releaseUrl: release.html_url ?? RELEASES_URL,
+      publishedAt: release.published_at,
+      isUpdateAvailable: compareVersions(latestVersion, currentVersion) > 0
+    }
+  } catch (error) {
+    return {
+      currentVersion,
+      latestVersion: currentVersion,
+      releaseName: '',
+      releaseUrl: RELEASES_URL,
+      isUpdateAvailable: false,
+      error: error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
+function normalizeVersion(value: string): string {
+  return value.trim().replace(/^v/i, '').trim()
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = normalizeVersion(a).split('.').map((part) => Number(part) || 0)
+  const right = normalizeVersion(b).split('.').map((part) => Number(part) || 0)
+  for (let index = 0; index < 3; index += 1) {
+    if ((left[index] ?? 0) > (right[index] ?? 0)) return 1
+    if ((left[index] ?? 0) < (right[index] ?? 0)) return -1
+  }
+  return 0
 }
 
 app.whenReady().then(() => {

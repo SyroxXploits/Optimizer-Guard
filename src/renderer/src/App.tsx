@@ -8,12 +8,16 @@ import {
   ChevronRight,
   Cpu,
   DatabaseBackup,
+  Download,
   Eraser,
+  ExternalLink,
   FileText,
   Gauge,
+  Github,
   HardDrive,
   Info,
   Monitor,
+  Palette,
   Play,
   RefreshCw,
   RotateCcw,
@@ -35,17 +39,26 @@ import type {
   NvidiaProfile,
   NvidiaState,
   ScheduledTaskRow,
-  SystemInfo
+  SystemInfo,
+  UpdateCheckResult
 } from '../../shared/types'
 
-type TabId = 'tasks' | 'system' | 'cleaning' | 'nvidia' | 'logs'
+type TabId = 'tasks' | 'system' | 'cleaning' | 'nvidia' | 'logs' | 'about'
+type ThemeId = 'aurora' | 'graphite' | 'ember'
 
 const tabs: Array<{ id: TabId; label: string; icon: typeof Gauge }> = [
   { id: 'tasks', label: 'Task Disabler', icon: Gauge },
   { id: 'system', label: 'System / BIOS Info', icon: Cpu },
   { id: 'cleaning', label: 'Cleaning', icon: Eraser },
   { id: 'nvidia', label: 'NVIDIA / DLSS Suggestions', icon: Sparkles },
-  { id: 'logs', label: 'Logs / Restore', icon: DatabaseBackup }
+  { id: 'logs', label: 'Logs / Restore', icon: DatabaseBackup },
+  { id: 'about', label: 'About / Updates', icon: Github }
+]
+
+const themes: Array<{ id: ThemeId; label: string }> = [
+  { id: 'aurora', label: 'Aurora' },
+  { id: 'graphite', label: 'Graphite' },
+  { id: 'ember', label: 'Ember' }
 ]
 
 const defaultSettings: AppSettings = {
@@ -61,10 +74,16 @@ function App(): JSX.Element {
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('Ready. Dry-run is on, so the first pass is safe.')
   const [version, setVersion] = useState('')
+  const [theme, setTheme] = useState<ThemeId>(() => (localStorage.getItem('optimizer-theme') as ThemeId) || 'aurora')
 
   useEffect(() => {
     void bootstrap()
   }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    localStorage.setItem('optimizer-theme', theme)
+  }, [theme])
 
   async function bootstrap(): Promise<void> {
     const [loadedSettings, loadedSnapshot, appVersion] = await Promise.all([
@@ -111,10 +130,10 @@ function App(): JSX.Element {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">S</div>
+          <div className="brand-mark">OG</div>
           <div>
-            <strong>Syrox</strong>
             <span>Optimizer Guard</span>
+            <small>Safe PC tuning</small>
           </div>
         </div>
         <nav>
@@ -128,6 +147,23 @@ function App(): JSX.Element {
             )
           })}
         </nav>
+        <div className="theme-card">
+          <div>
+            <Palette size={15} />
+            <strong>Theme</strong>
+          </div>
+          <div className="theme-dots">
+            {themes.map((item) => (
+              <button
+                aria-label={`Use ${item.label} theme`}
+                className={theme === item.id ? `theme-dot ${item.id} active` : `theme-dot ${item.id}`}
+                key={item.id}
+                onClick={() => setTheme(item.id)}
+                title={item.label}
+              />
+            ))}
+          </div>
+        </div>
         <div className="safety-card">
           <ShieldAlert size={20} />
           <strong>Guard rails active</strong>
@@ -141,6 +177,10 @@ function App(): JSX.Element {
             <span className="pill live">v{version || 'dev'}</span>
             <span className="muted">{notice}</span>
           </div>
+          <button className="ghost-link" onClick={() => void window.optimizerGuard.openExternal('https://github.com/SyroxXploits/Optimizer-Guard')}>
+            <Github size={15} />
+            GitHub
+          </button>
           <label className="dry-toggle">
             <input
               type="checkbox"
@@ -153,7 +193,7 @@ function App(): JSX.Element {
             -
           </button>
           <button className="window-button" onClick={() => void window.optimizerGuard.toggleMaximize()}>
-            □
+            []
           </button>
           <button className="window-button close" onClick={() => void window.optimizerGuard.close()}>
             <X size={15} />
@@ -176,6 +216,7 @@ function App(): JSX.Element {
           <NvidiaPanel settings={settings} saveSettings={saveSettings} runBusy={runBusy} setNotice={setNotice} />
         )}
         {activeTab === 'logs' && <LogsPanel snapshot={snapshot} settings={settings} runBusy={runBusy} refreshSnapshot={refreshSnapshot} />}
+        {activeTab === 'about' && <AboutPanel runBusy={runBusy} version={version} />}
       </main>
     </div>
   )
@@ -731,6 +772,103 @@ function LogsPanel({
       </div>
     </section>
   )
+}
+
+function AboutPanel({
+  runBusy,
+  version
+}: {
+  runBusy: <T>(label: string, task: () => Promise<T>, success?: string) => Promise<T | null>
+  version: string
+}): JSX.Element {
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
+
+  useEffect(() => {
+    void checkUpdates()
+  }, [])
+
+  async function checkUpdates(): Promise<void> {
+    const result = await runBusy('Checking GitHub releases...', () => window.optimizerGuard.checkForUpdates())
+    if (result) setUpdateInfo(result)
+  }
+
+  const updateTone = updateInfo?.error ? 'failed' : updateInfo?.isUpdateAvailable ? 'available' : 'current'
+
+  return (
+    <section className="page about-page">
+      <PageHero
+        eyebrow="About"
+        title="Optimizer Guard"
+        text="A guarded desktop optimizer for Windows gaming PCs. Preview changes, apply only what you choose, and keep restore history."
+        icon={<ShieldCheckIcon />}
+      />
+
+      <div className="about-grid">
+        <div className="panel about-card">
+          <div className="about-logo">OG</div>
+          <h2>Optimizer Guard</h2>
+          <p>Version {version || 'dev'}</p>
+          <div className="about-actions">
+            <button className="primary" onClick={() => void window.optimizerGuard.openExternal('https://github.com/SyroxXploits/Optimizer-Guard')}>
+              <Github size={16} />
+              GitHub repository
+              <ExternalLink size={13} />
+            </button>
+            <button onClick={() => void window.optimizerGuard.openExternal('https://github.com/SyroxXploits/Optimizer-Guard/releases')}>
+              <Download size={16} />
+              Releases
+              <ExternalLink size={13} />
+            </button>
+          </div>
+        </div>
+
+        <div className={`panel update-card ${updateTone}`}>
+          <div className="panel-title-row">
+            <div>
+              <span className="muted">Update checker</span>
+              <h2>{updateInfo?.isUpdateAvailable ? 'Update available' : updateInfo?.error ? 'Could not check updates' : 'You are up to date'}</h2>
+            </div>
+            {updateInfo?.isUpdateAvailable ? <Download size={30} /> : updateInfo?.error ? <ShieldAlert size={30} /> : <CheckCircle2 size={30} />}
+          </div>
+
+          <div className="spec-list two">
+            <Spec label="Installed" value={updateInfo?.currentVersion ?? version ?? 'dev'} />
+            <Spec label="Latest" value={updateInfo?.latestVersion ?? 'Checking...'} />
+          </div>
+
+          {updateInfo?.error && <p className="status-text error">{updateInfo.error}</p>}
+          {updateInfo?.publishedAt && <p className="status-text">Published {new Date(updateInfo.publishedAt).toLocaleDateString()}</p>}
+
+          <div className="about-actions">
+            <button className="primary" onClick={() => void checkUpdates()}>
+              <RefreshCw size={16} />
+              Check again
+            </button>
+            {updateInfo?.isUpdateAvailable && (
+              <button onClick={() => void window.optimizerGuard.openExternal(updateInfo.releaseUrl)}>
+                <ExternalLink size={16} />
+                Open latest release
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel compact-safety">
+        <h2>Guard rails</h2>
+        <div className="guard-list">
+          <span>No Defender, Firewall, or Windows Update disabling by default.</span>
+          <span>No personal folders, game saves, or Downloads cleanup.</span>
+          <span>Admin actions use UAC only when needed.</span>
+          <span>Every command is logged with output and dry-run state.</span>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function ShieldCheckIcon(): JSX.Element {
+  return <Shield size={28} />
 }
 
 function PageHero({ eyebrow, title, text, icon }: { eyebrow: string; title: string; text: string; icon: JSX.Element }): JSX.Element {
