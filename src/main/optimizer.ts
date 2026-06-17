@@ -26,7 +26,6 @@ interface CommandOptions {
 }
 
 const defaultSettings: AppSettings = {
-  dryRun: true,
   preferredResolution: '2560x1440',
   lastTab: 'tasks'
 }
@@ -537,22 +536,7 @@ export class OptimizerService {
     return this.runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(script)], options)
   }
 
-  private async runElevatedPowerShell(script: string, label: string, dryRun: boolean, kind: CommandLogEntry['kind']): Promise<CommandLogEntry> {
-    if (dryRun) {
-      return this.addLog({
-        kind,
-        label,
-        command: 'powershell.exe',
-        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-        stdout: 'Dry-run: elevated PowerShell action was previewed only.',
-        stderr: '',
-        exitCode: 0,
-        success: true,
-        dryRun: true,
-        elevated: true
-      })
-    }
-
+  private async runElevatedPowerShell(script: string, label: string, _dryRun: boolean, kind: CommandLogEntry['kind']): Promise<CommandLogEntry> {
     const workDir = join(this.dataDir, 'elevated')
     mkdirSync(workDir, { recursive: true })
     const resultFile = join(workDir, `${Date.now()}-${Math.random().toString(16).slice(2)}.json`)
@@ -636,21 +620,6 @@ ${script
   }
 
   private async runCommand(command: string, args: string[], options: CommandOptions): Promise<CommandLogEntry> {
-    if (options.dryRun) {
-      return this.addLog({
-        kind: options.kind,
-        label: options.label,
-        command,
-        args,
-        stdout: 'Dry-run: command was previewed only.',
-        stderr: '',
-        exitCode: 0,
-        success: true,
-        dryRun: true,
-        elevated: Boolean(options.elevated)
-      })
-    }
-
     return new Promise((resolve) => {
       const child = spawn(command, args, { windowsHide: true })
       let stdout = ''

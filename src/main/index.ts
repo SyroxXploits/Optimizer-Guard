@@ -163,23 +163,23 @@ function registerIpc(): void {
   ipcMain.handle('system:is-admin', () => service.isAdmin())
   ipcMain.handle('system:info', () => service.querySystemInfo())
   ipcMain.handle('tasks:query', () => service.queryTasks())
-  ipcMain.handle('tasks:set-state', (_event, taskPath: string, enable: boolean, dryRun: boolean) =>
-    service.setTaskState(taskPath, enable, dryRun)
+  ipcMain.handle('tasks:set-state', (_event, taskPath: string, enable: boolean) =>
+    service.setTaskState(taskPath, enable, false)
   )
   ipcMain.handle('features:query', () => service.queryFeatures())
-  ipcMain.handle('features:set-state', (_event, featureName: string, enable: boolean, dryRun: boolean) =>
-    service.setFeature(featureName, enable, dryRun)
+  ipcMain.handle('features:set-state', (_event, featureName: string, enable: boolean) =>
+    service.setFeature(featureName, enable, false)
   )
 
   ipcMain.handle('clean:scan', () => service.scanCleaningTargets())
-  ipcMain.handle('clean:run', (_event, ids: string[], dryRun: boolean) => service.cleanTargets(ids, dryRun))
+  ipcMain.handle('clean:run', (_event, ids: string[]) => service.cleanTargets(ids, false))
 
   ipcMain.handle('nvidia:state', () => service.queryNvidiaState())
-  ipcMain.handle('nvidia:apply', (_event, request: ApplyNvidiaProfileRequest, dryRun: boolean) =>
-    service.applyNvidiaProfile(request, dryRun)
+  ipcMain.handle('nvidia:apply', (_event, request: ApplyNvidiaProfileRequest) =>
+    service.applyNvidiaProfile(request, false)
   )
 
-  ipcMain.handle('restore:run', (_event, id: string, dryRun: boolean) => service.restore(id, dryRun))
+  ipcMain.handle('restore:run', (_event, id: string) => service.restore(id, false))
 }
 
 async function checkForUpdates(): Promise<UpdateCheckResult> {

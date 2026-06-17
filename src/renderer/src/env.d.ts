@@ -30,14 +30,14 @@ interface OptimizerGuardApi {
   isAdmin: () => Promise<boolean>
   getSystemInfo: () => Promise<SystemInfo>
   queryTasks: () => Promise<ScheduledTaskRow[]>
-  setTaskState: (taskPath: string, enable: boolean, dryRun: boolean) => Promise<CommandLogEntry>
+  setTaskState: (taskPath: string, enable: boolean) => Promise<CommandLogEntry>
   queryFeatures: () => Promise<FeatureToggle[]>
-  setFeatureState: (featureName: string, enable: boolean, dryRun: boolean) => Promise<CommandLogEntry>
+  setFeatureState: (featureName: string, enable: boolean) => Promise<CommandLogEntry>
   scanCleaning: () => Promise<CleanTarget[]>
-  cleanSelected: (ids: string[], dryRun: boolean) => Promise<CleanResult>
+  cleanSelected: (ids: string[]) => Promise<CleanResult>
   getNvidiaState: () => Promise<NvidiaState>
-  applyNvidiaProfile: (request: ApplyNvidiaProfileRequest, dryRun: boolean) => Promise<CommandLogEntry[]>
-  restore: (id: string, dryRun: boolean) => Promise<CommandLogEntry | null>
+  applyNvidiaProfile: (request: ApplyNvidiaProfileRequest) => Promise<CommandLogEntry[]>
+  restore: (id: string) => Promise<CommandLogEntry | null>
 }
 
 declare global {

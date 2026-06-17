@@ -65,7 +65,6 @@ const themes: Array<{ id: ThemeId; label: string }> = [
 ]
 
 const defaultSettings: AppSettings = {
-  dryRun: true,
   preferredResolution: '2560x1440',
   lastTab: 'tasks'
 }
@@ -75,7 +74,7 @@ function App(): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>('tasks')
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null)
   const [busy, setBusy] = useState('')
-  const [notice, setNotice] = useState('Preview mode is on, so the first pass is safe.')
+  const [notice, setNotice] = useState('Ready. Actions apply only when you click them.')
   const [version, setVersion] = useState('')
   const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem('optimizer-theme') as ThemeId | null
@@ -180,14 +179,6 @@ function App(): JSX.Element {
             <span className="pill live">v{version || 'dev'}</span>
             <span className="muted">{notice}</span>
           </div>
-          <label className="dry-toggle">
-            <input
-              type="checkbox"
-              checked={settings.dryRun}
-              onChange={(event) => void saveSettings({ ...settings, dryRun: event.target.checked })}
-            />
-            Preview / dry-run
-          </label>
           <button className="window-button" onClick={() => void window.optimizerGuard.minimize()}>
             -
           </button>
@@ -264,19 +255,19 @@ function TaskDisabler({
   async function toggleTask(task: ScheduledTaskRow, enable: boolean): Promise<void> {
     if (task.critical && !window.confirm('This looks like a Microsoft/security/system task. Continue anyway?')) return
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${task.path}`, async () => {
-      const result = await window.optimizerGuard.setTaskState(task.path, enable, settings.dryRun)
+      const result = await window.optimizerGuard.setTaskState(task.path, enable)
       await refresh()
       return result
-    }, `${settings.dryRun ? 'Previewed' : enable ? 'Enabled' : 'Disabled'} ${task.path}`)
+    }, `${enable ? 'Enabled' : 'Disabled'} ${task.path}`)
   }
 
   async function toggleFeature(feature: FeatureToggle, enable: boolean): Promise<void> {
-    if (!settings.dryRun && !window.confirm(`${enable ? 'Enable' : 'Disable'} ${feature.label}? A restart may be required.`)) return
+    if (!window.confirm(`${enable ? 'Enable' : 'Disable'} ${feature.label}? A restart may be required.`)) return
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${feature.label}`, async () => {
-      const result = await window.optimizerGuard.setFeatureState(feature.featureName, enable, settings.dryRun)
+      const result = await window.optimizerGuard.setFeatureState(feature.featureName, enable)
       setFeatures(await window.optimizerGuard.queryFeatures())
       return result
-    }, `${settings.dryRun ? 'Previewed' : 'Applied'} ${feature.label}. Restart required may be shown by Windows.`)
+    }, `Applied ${feature.label}. Restart required may be shown by Windows.`)
   }
 
   return (
@@ -284,7 +275,7 @@ function TaskDisabler({
       <PageHero
         eyebrow="Scheduled tasks"
         title="Find and toggle startup/background tasks."
-        text="Search, filter, preview, and restore task changes."
+        text="Search, filter, apply, and restore task changes."
         icon={<Gauge />}
       />
 
@@ -497,8 +488,8 @@ function CleaningPanel({
       return
     }
     if (chosen.some((target) => target.dangerous) && !window.confirm('One or more selected targets are marked dangerous. Continue?')) return
-    const result = await runBusy('Cleaning selected targets...', () => window.optimizerGuard.cleanSelected([...selected], settings.dryRun), 'Cleanup finished and logged.')
-    if (result) setNotice(`${settings.dryRun ? 'Previewed' : 'Cleaned'} ${formatBytes(result.beforeBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
+    const result = await runBusy('Cleaning selected targets...', () => window.optimizerGuard.cleanSelected([...selected]), 'Cleanup finished and logged.')
+    if (result) setNotice(`Cleaned ${formatBytes(result.beforeBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
     await scan()
   }
 
@@ -590,8 +581,8 @@ function NvidiaPanel({
   async function apply(): Promise<void> {
     if (!profile) return
     const request: ApplyNvidiaProfileRequest = { profile, ...actions }
-    const result = await runBusy('Applying selected NVIDIA and Windows gaming optimizations...', () => window.optimizerGuard.applyNvidiaProfile(request, settings.dryRun), 'NVIDIA optimizer actions finished.')
-    if (result) setNotice(`${settings.dryRun ? 'Previewed' : 'Applied'} ${result.length} optimizer actions. DLSS profile saved inside the app.`)
+    const result = await runBusy('Applying selected NVIDIA and Windows gaming optimizations...', () => window.optimizerGuard.applyNvidiaProfile(request), 'NVIDIA optimizer actions finished.')
+    if (result) setNotice(`Applied ${result.length} optimizer actions. DLSS profile saved inside the app.`)
   }
 
   function update<K extends keyof NvidiaProfile>(key: K, value: NvidiaProfile[K]): void {
@@ -706,7 +697,7 @@ function LogsPanel({
   refreshSnapshot: () => Promise<void>
 }): JSX.Element {
   async function restore(id: string): Promise<void> {
-    await runBusy('Running restore action...', () => window.optimizerGuard.restore(id, settings.dryRun), 'Restore action finished.')
+    await runBusy('Running restore action...', () => window.optimizerGuard.restore(id), 'Restore action finished.')
     await refreshSnapshot()
   }
 
@@ -801,7 +792,7 @@ function AboutPanel({
       <PageHero
         eyebrow="About"
         title="Optimizer Guard"
-        text="A guarded desktop optimizer for Windows gaming PCs. Preview changes, apply only what you choose, and keep restore history."
+        text="A guarded desktop optimizer for Windows gaming PCs. Apply only what you choose, and keep restore history."
         icon={<ShieldCheckIcon />}
       />
 
@@ -864,7 +855,7 @@ function AboutPanel({
           <span>No Defender, Firewall, or Windows Update disabling by default.</span>
           <span>No personal folders, game saves, or Downloads cleanup.</span>
           <span>Admin actions use UAC only when needed.</span>
-          <span>Every command is logged with output and dry-run state.</span>
+          <span>Every command is logged with output and restore context.</span>
         </div>
       </div>
     </section>

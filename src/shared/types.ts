@@ -148,7 +148,6 @@ export interface ApplyNvidiaProfileRequest {
 }
 
 export interface AppSettings {
-  dryRun: boolean
   preferredResolution: string
   lastTab: string
 }

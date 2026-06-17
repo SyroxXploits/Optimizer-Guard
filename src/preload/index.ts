@@ -14,20 +14,20 @@ import type {
 } from '../shared/types'
 
 const demoSnapshot = {
-  settings: { dryRun: true, preferredResolution: '2560x1440', lastTab: 'tasks' },
+  settings: { preferredResolution: '2560x1440', lastTab: 'tasks' },
   logs: [
     {
       id: 'demo-log-1',
       timestamp: new Date().toISOString(),
       kind: 'nvidia',
-      label: 'Preview NVIDIA optimizer profile',
+      label: 'Apply NVIDIA optimizer profile',
       command: 'internal',
       args: ['Quality', 'Transformer if available', 'On + Boost'],
-      stdout: 'Dry-run profile saved for preview.',
+      stdout: 'Optimizer profile applied in demo mode.',
       stderr: '',
       exitCode: 0,
       success: true,
-      dryRun: true,
+      dryRun: false,
       elevated: false
     }
   ],
@@ -314,21 +314,21 @@ const optimizerGuard = process.env.OPTIMIZER_GUARD_DEMO === '1' ? demoApi : {
   getSystemInfo: (): Promise<SystemInfo> => ipcRenderer.invoke('system:info'),
 
   queryTasks: (): Promise<ScheduledTaskRow[]> => ipcRenderer.invoke('tasks:query'),
-  setTaskState: (taskPath: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> =>
-    ipcRenderer.invoke('tasks:set-state', taskPath, enable, dryRun),
+  setTaskState: (taskPath: string, enable: boolean): Promise<CommandLogEntry> =>
+    ipcRenderer.invoke('tasks:set-state', taskPath, enable),
 
   queryFeatures: (): Promise<FeatureToggle[]> => ipcRenderer.invoke('features:query'),
-  setFeatureState: (featureName: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> =>
-    ipcRenderer.invoke('features:set-state', featureName, enable, dryRun),
+  setFeatureState: (featureName: string, enable: boolean): Promise<CommandLogEntry> =>
+    ipcRenderer.invoke('features:set-state', featureName, enable),
 
   scanCleaning: (): Promise<CleanTarget[]> => ipcRenderer.invoke('clean:scan'),
-  cleanSelected: (ids: string[], dryRun: boolean): Promise<CleanResult> => ipcRenderer.invoke('clean:run', ids, dryRun),
+  cleanSelected: (ids: string[]): Promise<CleanResult> => ipcRenderer.invoke('clean:run', ids),
 
   getNvidiaState: (): Promise<NvidiaState> => ipcRenderer.invoke('nvidia:state'),
-  applyNvidiaProfile: (request: ApplyNvidiaProfileRequest, dryRun: boolean): Promise<CommandLogEntry[]> =>
-    ipcRenderer.invoke('nvidia:apply', request, dryRun),
+  applyNvidiaProfile: (request: ApplyNvidiaProfileRequest): Promise<CommandLogEntry[]> =>
+    ipcRenderer.invoke('nvidia:apply', request),
 
-  restore: (id: string, dryRun: boolean): Promise<CommandLogEntry | null> => ipcRenderer.invoke('restore:run', id, dryRun)
+  restore: (id: string): Promise<CommandLogEntry | null> => ipcRenderer.invoke('restore:run', id)
 }
 
 contextBridge.exposeInMainWorld('optimizerGuard', optimizerGuard)

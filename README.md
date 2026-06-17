@@ -46,8 +46,7 @@ Scan your system, review suggested optimizations, apply only what you choose, an
 - NVIDIA / DLSS Suggestions - pick DLSS mode, preset style, Reflex, Frame Generation behavior, and preferred resolution.
 - NVIDIA App resolution helper - patch safe NVIDIA App metadata from `3840x2160` to your preferred resolution, with backups.
 - Gaming tweaks - disable NVIDIA overlay, enable Game Mode, and disable Xbox Game DVR capture when selected.
-- Logs / Restore - every command is logged with output, dry-run state, elevation state, and restore actions where possible.
-- Dry-run mode - preview actions before applying them.
+- Logs / Restore - every command is logged with output, elevation state, and restore actions where possible.
 - Admin guard - the app runs normally without admin and only asks for UAC when a selected action needs it.
 
 ## Safety

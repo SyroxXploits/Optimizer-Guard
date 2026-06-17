@@ -261,21 +261,8 @@ nav {
 }
 
 .titlebar button,
-.dry-toggle,
 .window-button {
   -webkit-app-region: no-drag;
-}
-
-.dry-toggle {
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  display: flex;
-  gap: 7px;
-  align-items: center;
-  color: var(--soft);
-  background: rgba(255, 255, 255, 0.04);
 }
 
 .window-button {
