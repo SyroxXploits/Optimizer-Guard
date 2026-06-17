@@ -106,7 +106,7 @@ export class OptimizerService {
       kind: 'task',
       label: 'Query scheduled tasks'
     })
-    if (!result.success) return []
+    if (!result.success) return this.queryTasksPowerShellFallback('schtasks failed')
     const byPath = new Map<string, ScheduledTaskRow>()
     for (const row of parseCsv(result.stdout)) {
       const taskName = pick(row, 'TaskName', 'Task Name')
@@ -132,7 +132,64 @@ export class OptimizerService {
         critical
       })
     }
-    return [...byPath.values()]
+    const parsed = [...byPath.values()]
+    if (parsed.length > 0) return parsed
+    const positional = parseSchtasksCsvByPosition(result.stdout)
+    if (positional.length > 0) {
+      this.addLog({
+        kind: 'task',
+        label: 'Parsed scheduled tasks by CSV column position',
+        command: 'internal',
+        args: ['schtasks CSV fallback'],
+        stdout: `Parsed ${positional.length} tasks without relying on localized CSV headers.`,
+        stderr: '',
+        exitCode: 0,
+        success: true,
+        dryRun: false,
+        elevated: false
+      })
+      return positional
+    }
+    return this.queryTasksPowerShellFallback('schtasks CSV parser returned 0 tasks')
+  }
+
+  private async queryTasksPowerShellFallback(reason: string): Promise<ScheduledTaskRow[]> {
+    const result = await this.runPowerShell(scheduledTasksFallbackScript(), {
+      kind: 'task',
+      label: `Query scheduled tasks fallback (${reason})`
+    })
+    if (!result.success || !result.stdout.trim()) return []
+    try {
+      const parsed = JSON.parse(result.stdout.trim()) as Array<{
+        name?: string
+        path?: string
+        status?: string
+        nextRun?: string
+        lastRun?: string
+        author?: string
+        taskToRun?: string
+        enabled?: boolean
+      }>
+      return parsed.map((task) => {
+        const path = String(task.path ?? '')
+        const microsoft = path.toLowerCase().startsWith('\\microsoft\\')
+        const critical = criticalTaskHints.some((hint) => path.toLowerCase().startsWith(hint.toLowerCase()))
+        return {
+          name: String(task.name ?? path.split('\\').filter(Boolean).at(-1) ?? 'Unknown task'),
+          path,
+          status: String(task.status ?? 'Unknown'),
+          nextRun: String(task.nextRun ?? ''),
+          lastRun: String(task.lastRun ?? ''),
+          author: String(task.author ?? ''),
+          taskToRun: String(task.taskToRun ?? ''),
+          enabled: Boolean(task.enabled),
+          microsoft,
+          critical
+        }
+      }).filter((task) => task.path)
+    } catch {
+      return []
+    }
   }
 
   async setTaskState(taskPath: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> {
@@ -860,6 +917,47 @@ ${script
 }
 
 function parseCsv(text: string): Record<string, string>[] {
+  const rows = parseCsvRows(text)
+  const headers = rows.shift() ?? []
+  return rows.map((values) =>
+    headers.reduce<Record<string, string>>((acc, header, index) => {
+      acc[header] = values[index] ?? ''
+      return acc
+    }, {})
+  )
+}
+
+function parseSchtasksCsvByPosition(text: string): ScheduledTaskRow[] {
+  const rows = parseCsvRows(text).slice(1)
+  const byPath = new Map<string, ScheduledTaskRow>()
+  for (const row of rows) {
+    const taskName = row[1] ?? ''
+    if (!taskName || byPath.has(taskName)) continue
+    const runtimeStatus = row[3] ?? ''
+    const scheduledState = row[11] || runtimeStatus
+    const normalizedState = normalizeStatus(scheduledState)
+    const enabled = !['disabled', 'desactive'].includes(normalizedState)
+    const status = enabled && normalizeStatus(runtimeStatus).includes('running') ? runtimeStatus : scheduledState
+    const microsoft = taskName.toLowerCase().startsWith('\\microsoft\\')
+    const critical = criticalTaskHints.some((hint) => taskName.toLowerCase().startsWith(hint.toLowerCase()))
+    const split = taskName.lastIndexOf('\\')
+    byPath.set(taskName, {
+      name: split >= 0 ? taskName.slice(split + 1) : taskName,
+      path: taskName,
+      status,
+      nextRun: row[2] ?? '',
+      lastRun: row[5] ?? '',
+      author: row[7] ?? '',
+      taskToRun: row[8] ?? '',
+      enabled,
+      microsoft,
+      critical
+    })
+  }
+  return [...byPath.values()]
+}
+
+function parseCsvRows(text: string): string[][] {
   const rows: string[][] = []
   let field = ''
   let row: string[] = []
@@ -889,13 +987,7 @@ function parseCsv(text: string): Record<string, string>[] {
     row.push(field)
     rows.push(row)
   }
-  const headers = rows.shift() ?? []
-  return rows.map((values) =>
-    headers.reduce<Record<string, string>>((acc, header, index) => {
-      acc[header] = values[index] ?? ''
-      return acc
-    }, {})
-  )
+  return rows
 }
 
 function pick(row: Record<string, string>, ...keys: string[]): string {
@@ -1041,6 +1133,33 @@ $cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPerce
   memoryGb = $memoryGb
   cpuLoad = $cpuLoad
 }`
+}
+
+function scheduledTasksFallbackScript(): string {
+  return `
+$tasks = Get-ScheduledTask -ErrorAction Stop
+$rows = foreach ($task in $tasks) {
+  $info = $null
+  try { $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue } catch {}
+  $actionText = ($task.Actions | ForEach-Object {
+    $parts = @($_.Execute, $_.Arguments) | Where-Object { $_ }
+    $parts -join ' '
+  }) -join '; '
+  $fullPath = (($task.TaskPath.TrimEnd('\\') + '\\' + $task.TaskName) -replace '\\\\+', '\\')
+  if (-not $fullPath.StartsWith('\\')) { $fullPath = '\\' + $fullPath }
+  [pscustomobject]@{
+    name = $task.TaskName
+    path = $fullPath
+    status = [string]$task.State
+    nextRun = if ($info -and $info.NextRunTime -and $info.NextRunTime.Year -gt 1900) { $info.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
+    lastRun = if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 1900) { $info.LastRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '' }
+    author = [string]$task.Principal.UserId
+    taskToRun = $actionText
+    enabled = ([string]$task.State -ne 'Disabled')
+  }
+}
+@($rows) | ConvertTo-Json -Depth 4 -Compress
+`
 }
 
 function taskStateScript(taskPath: string, enable: boolean): string {

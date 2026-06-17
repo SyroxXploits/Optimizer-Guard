@@ -249,7 +249,7 @@ function TaskDisabler({
       setTasks(taskRows)
       setFeatures(featureRows)
       return taskRows
-    }, 'Task list refreshed from schtasks.')
+    }, 'Task list refreshed.')
   }
 
   const filtered = tasks
@@ -378,7 +378,7 @@ function TaskDisabler({
           </tbody>
         </table>
       </div>
-      {tasks.length === 0 && <EmptyHint text="No tasks loaded yet. Click Refresh if Windows blocked the first scan." setNotice={setNotice} />}
+      {tasks.length === 0 && <EmptyHint text="No tasks loaded yet. Open Logs to see whether schtasks or the ScheduledTasks fallback failed." setNotice={setNotice} />}
     </section>
   )
 }
