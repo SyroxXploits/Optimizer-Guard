@@ -199,32 +199,42 @@ export class OptimizerService {
   }
 
   async setTaskState(taskPath: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> {
-    const args = ['/Change', '/TN', taskPath, enable ? '/Enable' : '/Disable']
+    const normalizedTaskPath = normalizeTaskPath(taskPath)
+    const args = ['/Change', '/TN', normalizedTaskPath, enable ? '/Enable' : '/Disable']
     if (!enable) {
-      await this.runCommand('schtasks.exe', ['/End', '/TN', taskPath], {
+      await this.runCommand('schtasks.exe', ['/End', '/TN', normalizedTaskPath], {
         kind: 'task',
-        label: `Stop running scheduled task ${taskPath}`,
+        label: `Stop running scheduled task ${normalizedTaskPath}`,
         dryRun
       })
     }
 
     let log = await this.runCommand('schtasks.exe', args, {
       kind: 'task',
-      label: `${enable ? 'Enable' : 'Disable'} scheduled task ${taskPath}`,
+      label: `${enable ? 'Enable' : 'Disable'} scheduled task ${normalizedTaskPath}`,
       dryRun
     })
 
-    if (!log.success || !(await this.verifyTaskState(taskPath, enable))) {
-      const elevatedScript = taskStateScript(taskPath, enable)
-      log = await this.runElevatedPowerShell(elevatedScript, `${enable ? 'Enable' : 'Disable'} scheduled task ${taskPath}`, dryRun, 'task')
+    if (!log.success || !(await this.verifyTaskState(normalizedTaskPath, enable))) {
+      const script = taskStateScript(normalizedTaskPath, enable)
+      log = await this.runPowerShell(script, {
+        kind: 'task',
+        label: `${enable ? 'Enable' : 'Disable'} scheduled task ${normalizedTaskPath} via ScheduledTasks`,
+        dryRun
+      })
     }
 
-    if (log.success && !(await this.verifyTaskState(taskPath, enable))) {
+    if (!log.success || !(await this.verifyTaskState(normalizedTaskPath, enable))) {
+      const elevatedScript = taskStateScript(normalizedTaskPath, enable)
+      log = await this.runElevatedPowerShell(elevatedScript, `${enable ? 'Enable' : 'Disable'} scheduled task ${normalizedTaskPath}`, dryRun, 'task')
+    }
+
+    if (log.success && !(await this.verifyTaskState(normalizedTaskPath, enable))) {
       log = this.addLog({
         kind: 'task',
-        label: `Verify scheduled task ${taskPath}`,
+        label: `Verify scheduled task ${normalizedTaskPath}`,
         command: 'schtasks.exe',
-        args: ['/query', '/TN', taskPath, '/fo', 'CSV', '/v'],
+        args: ['/query', '/TN', normalizedTaskPath, '/fo', 'CSV', '/v'],
         stdout: `Expected task to be ${enable ? 'enabled' : 'disabled'}, but Windows reported a different state.`,
         stderr: '',
         exitCode: 1,
@@ -235,14 +245,14 @@ export class OptimizerService {
     }
 
     if (log.success && !dryRun) {
-      const restoreScript = taskStateScript(taskPath, !enable)
+      const restoreScript = taskStateScript(normalizedTaskPath, !enable)
       this.addRestore({
         kind: 'task',
-        label: `Undo: ${enable ? 'disable' : 're-enable'} ${taskPath}`,
+        label: `Undo: ${enable ? 'disable' : 're-enable'} ${normalizedTaskPath}`,
         command: log.elevated ? 'powershell.exe' : 'schtasks.exe',
         args: log.elevated
           ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', restoreScript]
-          : ['/Change', '/TN', taskPath, enable ? '/Disable' : '/Enable'],
+          : ['/Change', '/TN', normalizedTaskPath, enable ? '/Disable' : '/Enable'],
         elevated: log.elevated
       })
     }
@@ -250,8 +260,9 @@ export class OptimizerService {
   }
 
   private async verifyTaskState(taskPath: string, enabled: boolean): Promise<boolean> {
+    const normalizedTaskPath = normalizeTaskPath(taskPath)
     const tasks = await this.queryTasks()
-    const task = tasks.find((item) => item.path.toLowerCase() === taskPath.toLowerCase())
+    const task = tasks.find((item) => normalizeTaskPath(item.path).toLowerCase() === normalizedTaskPath.toLowerCase())
     return task ? task.enabled === enabled : false
   }
 
@@ -799,6 +810,8 @@ export class OptimizerService {
     mkdirSync(workDir, { recursive: true })
     const resultFile = join(workDir, `${Date.now()}-${Math.random().toString(16).slice(2)}.json`)
     const helperScript = join(workDir, `${Date.now()}-helper.ps1`)
+    const escapedResultFile = escapePowerShellSingle(resultFile)
+    const escapedHelperScript = escapePowerShellSingle(helperScript)
     const wrapped = `
 $ErrorActionPreference = 'Continue'
 $out = ''
@@ -816,20 +829,29 @@ ${script
   $err = $_ | Out-String
   $code = 1
 }
-[pscustomobject]@{ stdout = $out; stderr = $err; exitCode = $code } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '${escapePowerShellSingle(resultFile)}' -Encoding UTF8
+[pscustomobject]@{ stdout = $out; stderr = $err; exitCode = $code } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '${escapedResultFile}' -Encoding UTF8
 `
     writeFileSync(helperScript, wrapped, 'utf8')
+    const launchScript = [
+      `$helper = '${escapedHelperScript}'`,
+      "$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper)",
+      "Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList $arguments"
+    ].join('\n')
     const launch = await this.runCommandRaw(
       'powershell.exe',
       [
         '-NoProfile',
         '-ExecutionPolicy',
         'Bypass',
-        '-Command',
-        `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${escapePowerShellSingle(helperScript)}')`
+        '-EncodedCommand',
+        encodePowerShell(launchScript)
       ],
       true
     )
+
+    for (let attempt = 0; attempt < 20 && !existsSync(resultFile); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
 
     let stdout = launch.stdout
     let stderr = launch.stderr
@@ -844,7 +866,16 @@ ${script
         stderr += '\nUnable to parse elevated result file.'
       }
     } else {
-      stderr = `${stderr}\nElevated action did not return a result. UAC may have been cancelled or blocked.`.trim()
+      stderr = [
+        stderr,
+        launch.stdout ? `Launcher stdout:\n${launch.stdout}` : '',
+        launch.stderr ? `Launcher stderr:\n${launch.stderr}` : '',
+        `Elevated action did not return a result file: ${resultFile}`,
+        `Helper script: ${helperScript}`,
+        'UAC may have been cancelled, blocked by policy, or PowerShell elevation may have failed.'
+      ]
+        .filter(Boolean)
+        .join('\n')
       exitCode = exitCode === 0 ? 1 : exitCode
     }
     return this.addLog({
@@ -1068,6 +1099,12 @@ function normalizeStatus(input: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '')
+}
+
+function normalizeTaskPath(taskPath: string): string {
+  const trimmed = taskPath.trim().replace(/\//g, '\\')
+  if (!trimmed) return trimmed
+  return trimmed.startsWith('\\') ? trimmed : `\\${trimmed}`
 }
 
 function safeDeleteScript(paths: string[]): string {

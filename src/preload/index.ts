@@ -46,12 +46,12 @@ const demoSnapshot = {
 } as AppSnapshot
 
 const demoApi = {
-  appVersion: async () => '1.0.3',
+  appVersion: async () => '1.0.4',
   checkForUpdates: async () => ({
-    currentVersion: '1.0.3',
-    latestVersion: '1.0.3',
-    releaseName: 'Optimizer Guard v1.0.3',
-    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.0.3',
+    currentVersion: '1.0.4',
+    latestVersion: '1.0.4',
+    releaseName: 'Optimizer Guard v1.0.4',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.0.4',
     isUpdateAvailable: false
   }),
   minimize: async () => undefined,
