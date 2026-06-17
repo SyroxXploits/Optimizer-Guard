@@ -235,11 +235,14 @@ export class OptimizerService {
     }
 
     if (log.success && !dryRun) {
+      const restoreScript = taskStateScript(taskPath, !enable)
       this.addRestore({
         kind: 'task',
         label: `Undo: ${enable ? 'disable' : 're-enable'} ${taskPath}`,
-        command: 'schtasks.exe',
-        args: ['/Change', '/TN', taskPath, enable ? '/Disable' : '/Enable'],
+        command: log.elevated ? 'powershell.exe' : 'schtasks.exe',
+        args: log.elevated
+          ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', restoreScript]
+          : ['/Change', '/TN', taskPath, enable ? '/Disable' : '/Enable'],
         elevated: log.elevated
       })
     }
@@ -1195,22 +1198,27 @@ $rows = foreach ($task in $tasks) {
 
 function taskStateScript(taskPath: string, enable: boolean): string {
   const task = escapePowerShellSingle(taskPath)
-  const switchName = enable ? '/Enable' : '/Disable'
-  const expected = enable ? 'Enabled' : 'Disabled'
   return `
-$tn = '${task}'
-$output = ''
-if ('${enable ? '1' : '0'}' -eq '0') {
-  $output += (schtasks.exe /End /TN $tn 2>&1 | Out-String)
+$fullPath = '${task}'
+$taskName = Split-Path -Leaf $fullPath
+$taskPath = Split-Path -Parent $fullPath
+if ([string]::IsNullOrWhiteSpace($taskPath) -or $taskPath -eq '\\') {
+  $taskPath = '\\'
+} else {
+  $taskPath = ($taskPath.TrimEnd('\\') + '\\')
 }
-$output += (schtasks.exe /Change /TN $tn ${switchName} 2>&1 | Out-String)
-$csv = schtasks.exe /Query /TN $tn /FO CSV /V 2>&1
-if ($LASTEXITCODE -ne 0) { $output += ($csv | Out-String); $output; exit 1 }
-$rows = $csv | ConvertFrom-Csv
-$state = @($rows)[0].'Scheduled Task State'
-$output += "Scheduled Task State: $state"
-$output
-if ($state -ne '${expected}') { exit 1 }
+$task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+if ('${enable ? '1' : '0'}' -eq '0') {
+  try { Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue } catch {}
+  $task | Disable-ScheduledTask -ErrorAction Stop | Out-Null
+} else {
+  $task | Enable-ScheduledTask -ErrorAction Stop | Out-Null
+}
+$updated = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+$state = [string]$updated.State
+"Scheduled task $fullPath is now $state."
+if ('${enable ? '1' : '0'}' -eq '1' -and $state -eq 'Disabled') { exit 1 }
+if ('${enable ? '1' : '0'}' -eq '0' -and $state -ne 'Disabled') { exit 1 }
 `
 }
 

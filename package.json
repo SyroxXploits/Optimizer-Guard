@@ -1,6 +1,6 @@
 {
   "name": "optimizer-guard",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Guarded Windows gaming optimizer with task controls, cleanup, NVIDIA/DLSS suggestions, logs, and restore history",
   "main": "./out/main/index.js",
   "homepage": ".",
