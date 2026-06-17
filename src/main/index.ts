@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, screen, shell } from 'electron'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
@@ -12,12 +12,21 @@ const RELEASES_URL = `https://github.com/${REPOSITORY}/releases/latest`
 let mainWindow: BrowserWindow | null = null
 const service = new OptimizerService()
 
+if (process.env.OPTIMIZER_GUARD_SMOKE === '1' || process.env.OPTIMIZER_GUARD_CAPTURE === '1') {
+  const debugUserData = join(process.cwd(), 'debug', process.env.OPTIMIZER_GUARD_SMOKE === '1' ? 'user-data-smoke' : 'user-data-capture')
+  mkdirSync(debugUserData, { recursive: true })
+  app.setPath('userData', debugUserData)
+}
+
 function createWindow(): void {
+  const workArea = screen.getPrimaryDisplay().workAreaSize
+  const width = Math.min(Math.max(1280, Math.round(workArea.width * 0.72)), workArea.width - 60)
+  const height = Math.min(Math.max(820, Math.round(workArea.height * 0.72)), workArea.height - 60)
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 1100,
-    minHeight: 720,
+    width,
+    height,
+    minWidth: 1040,
+    minHeight: 680,
     title: 'Optimizer Guard',
     backgroundColor: '#070a0d',
     show: false,
@@ -79,6 +88,24 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
   await check('app version', 'window.optimizerGuard.appVersion()')
   await check('snapshot loads', "window.optimizerGuard.getSnapshot().then((snapshot) => ({ logs: snapshot.logs.length, restore: snapshot.restoreHistory.length }))")
   await check('tasks query', "window.optimizerGuard.queryTasks().then((tasks) => ({ count: tasks.length, sample: tasks.slice(0, 3).map((task) => ({ name: task.name, status: task.status, enabled: task.enabled })) }))")
+  await check('disabled filter renders disabled rows', `
+    (async () => {
+      const tasksButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Tasks'))
+      tasksButton?.click()
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      const disabledButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim().toLowerCase() === 'disabled')
+      disabledButton?.click()
+      let statuses = []
+      for (let index = 0; index < 24; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        statuses = Array.from(document.querySelectorAll('.task-status strong')).map((item) => item.textContent?.trim()).filter(Boolean)
+        if (statuses.length > 0) break
+      }
+      const allDisabled = statuses.length > 0 && statuses.every((status) => status === 'Disabled')
+      if (!allDisabled) throw new Error('Disabled filter rendered non-disabled rows: ' + statuses.slice(0, 8).join(', '))
+      return { count: statuses.length, statuses: statuses.slice(0, 8), allDisabled }
+    })()
+  `)
   await check('features query', "window.optimizerGuard.queryFeatures().then((features) => features.map((feature) => ({ id: feature.id, state: feature.state })))")
   await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, gpu: info.gpu.name, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
   await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")

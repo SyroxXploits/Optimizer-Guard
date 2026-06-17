@@ -107,14 +107,19 @@ export class OptimizerService {
       label: 'Query scheduled tasks'
     })
     if (!result.success) return []
-    return parseCsv(result.stdout).map((row) => {
+    const byPath = new Map<string, ScheduledTaskRow>()
+    for (const row of parseCsv(result.stdout)) {
       const taskName = pick(row, 'TaskName', 'Task Name')
-      const status = pick(row, 'Status')
-      const enabled = !['disabled', 'desactive'].includes(normalizeStatus(status))
+      if (!taskName || byPath.has(taskName)) continue
+      const scheduledState = pick(row, 'Scheduled Task State') || pick(row, 'Status')
+      const runtimeStatus = pick(row, 'Status')
+      const normalizedState = normalizeStatus(scheduledState)
+      const enabled = !['disabled', 'desactive'].includes(normalizedState)
+      const status = enabled && normalizeStatus(runtimeStatus).includes('running') ? runtimeStatus : scheduledState
       const microsoft = taskName.toLowerCase().startsWith('\\microsoft\\')
       const critical = criticalTaskHints.some((hint) => taskName.toLowerCase().startsWith(hint.toLowerCase()))
       const split = taskName.lastIndexOf('\\')
-      return {
+      byPath.set(taskName, {
         name: split >= 0 ? taskName.slice(split + 1) : taskName,
         path: taskName,
         status,
@@ -125,8 +130,9 @@ export class OptimizerService {
         enabled,
         microsoft,
         critical
-      }
-    })
+      })
+    }
+    return [...byPath.values()]
   }
 
   async setTaskState(taskPath: string, enable: boolean, dryRun: boolean): Promise<CommandLogEntry> {
@@ -236,17 +242,15 @@ export class OptimizerService {
 
   async scanCleaningTargets(): Promise<CleanTarget[]> {
     const targets = this.getCleanDefinitions()
-    const scanned = await Promise.all(
-      targets.map(async (target) => {
-        const estimatedBytes = target.commandOnly ? 0 : await this.estimatePaths(target.paths)
-        return {
-          ...target,
-          estimatedBytes,
-          detected: target.commandOnly ? true : estimatedBytes > 0
-        }
-      })
-    )
-    return scanned
+    const estimates = await this.estimateTargets(targets.filter((target) => !target.commandOnly))
+    return targets.map((target) => {
+      const estimatedBytes = target.commandOnly ? 0 : estimates[target.id] ?? 0
+      return {
+        ...target,
+        estimatedBytes,
+        detected: target.commandOnly ? true : estimatedBytes > 0
+      }
+    })
   }
 
   async cleanTargets(ids: string[], dryRun: boolean): Promise<CleanResult> {
@@ -471,19 +475,27 @@ export class OptimizerService {
     ]
   }
 
-  private async estimatePaths(paths: string[]): Promise<number> {
-    const json = JSON.stringify(paths.map(expandEnv))
+  private async estimateTargets(targets: CleanTarget[]): Promise<Record<string, number>> {
+    const json = JSON.stringify(targets.map((target) => ({ id: target.id, paths: target.paths.map(expandEnv) })))
     const script = [
-      `$pathsJson = @'\n${json}\n'@`,
-      '$paths = $pathsJson | ConvertFrom-Json',
-      '$total = 0',
-      'foreach ($p in $paths) {',
-      '  Get-ChildItem -Path $p -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { if (-not $_.PSIsContainer) { $total += $_.Length } }',
+      `$targetsJson = @'\n${json}\n'@`,
+      '$targets = $targetsJson | ConvertFrom-Json',
+      '$result = @{}',
+      'foreach ($target in $targets) {',
+      '  $total = 0',
+      '  foreach ($p in $target.paths) {',
+      '    Get-ChildItem -Path $p -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { if (-not $_.PSIsContainer) { $total += $_.Length } }',
+      '  }',
+      '  $result[$target.id] = $total',
       '}',
-      '$total'
+      '$result | ConvertTo-Json -Compress'
     ].join('\n')
-    const result = await this.runPowerShell(script, { kind: 'clean', label: 'Estimate cleanup target size' })
-    return Number(result.stdout.trim()) || 0
+    const result = await this.runPowerShell(script, { kind: 'clean', label: 'Estimate cleanup target sizes' })
+    try {
+      return JSON.parse(result.stdout.trim()) as Record<string, number>
+    } catch {
+      return {}
+    }
   }
 
   private async queryNvidiaQuery(): Promise<{ name: string; driverVersion: string; vramMb: number | null; usagePercent: number | null; temperatureC: number | null }> {

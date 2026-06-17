@@ -16,6 +16,8 @@ import {
   Github,
   HardDrive,
   Info,
+  Maximize2,
+  Minus,
   Monitor,
   Palette,
   Play,
@@ -180,10 +182,10 @@ function App(): JSX.Element {
             <span className="muted">{notice}</span>
           </div>
           <button className="window-button" onClick={() => void window.optimizerGuard.minimize()}>
-            -
+            <Minus size={15} />
           </button>
           <button className="window-button" onClick={() => void window.optimizerGuard.toggleMaximize()}>
-            []
+            <Maximize2 size={14} />
           </button>
           <button className="window-button close" onClick={() => void window.optimizerGuard.close()}>
             <X size={15} />
@@ -256,6 +258,7 @@ function TaskDisabler({
     if (task.critical && !window.confirm(`"${task.name}" looks like a Microsoft/security/system task.\n\nChanging it can reduce Windows protection or maintenance. Continue anyway?`)) return
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${task.path}`, async () => {
       const result = await window.optimizerGuard.setTaskState(task.path, enable)
+      assertCommandSuccess(result)
       await refresh()
       return result
     }, `${enable ? 'Enabled' : 'Disabled'} ${task.path}`)
@@ -265,6 +268,7 @@ function TaskDisabler({
     if (!window.confirm(`${enable ? 'Enable' : 'Disable'} ${feature.label}? A restart may be required.`)) return
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${feature.label}`, async () => {
       const result = await window.optimizerGuard.setFeatureState(feature.featureName, enable)
+      assertCommandSuccess(result)
       setFeatures(await window.optimizerGuard.queryFeatures())
       return result
     }, `Applied ${feature.label}. Restart required may be shown by Windows.`)
@@ -504,7 +508,11 @@ function CleaningPanel({
       .filter(Boolean)
       .join('\n')
     if (!window.confirm(message)) return
-    const result = await runBusy('Cleaning selected targets...', () => window.optimizerGuard.cleanSelected([...selected]), 'Cleanup finished and logged.')
+    const result = await runBusy('Cleaning selected targets...', async () => {
+      const cleaned = await window.optimizerGuard.cleanSelected([...selected])
+      assertLogsSuccess(cleaned.logs)
+      return cleaned
+    }, 'Cleanup finished and logged.')
     if (result) setNotice(`Cleaned ${formatBytes(result.beforeBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
     await scan()
   }
@@ -608,7 +616,11 @@ function NvidiaPanel({
     }
     if (!window.confirm(`Apply ${selectedActionLabels.length} optimizer action${selectedActionLabels.length === 1 ? '' : 's'}?\n\n${selectedActionLabels.join('\n')}`)) return
     const request: ApplyNvidiaProfileRequest = { profile, ...actions }
-    const result = await runBusy('Applying selected NVIDIA and Windows gaming optimizations...', () => window.optimizerGuard.applyNvidiaProfile(request), 'NVIDIA optimizer actions finished.')
+    const result = await runBusy('Applying selected NVIDIA and Windows gaming optimizations...', async () => {
+      const logs = await window.optimizerGuard.applyNvidiaProfile(request)
+      assertLogsSuccess(logs)
+      return logs
+    }, 'NVIDIA optimizer actions finished.')
     if (result) setNotice(`Applied ${result.length} optimizer actions. DLSS profile saved inside the app.`)
   }
 
@@ -724,7 +736,11 @@ function LogsPanel({
   refreshSnapshot: () => Promise<void>
 }): JSX.Element {
   async function restore(id: string): Promise<void> {
-    await runBusy('Running restore action...', () => window.optimizerGuard.restore(id), 'Restore action finished.')
+    await runBusy('Running restore action...', async () => {
+      const result = await window.optimizerGuard.restore(id)
+      if (result) assertCommandSuccess(result)
+      return result
+    }, 'Restore action finished.')
     await refreshSnapshot()
   }
 
@@ -854,11 +870,12 @@ function AboutPanel({
           </div>
 
           <div className="spec-list two">
-            <Spec label="Installed" value={updateInfo?.currentVersion ?? version ?? 'dev'} />
-            <Spec label="Latest" value={updateInfo?.latestVersion ?? 'Checking...'} />
+            <Spec label="Version" value={updateInfo?.currentVersion ?? version ?? 'dev'} />
+            {updateInfo?.isUpdateAvailable && <Spec label="Update" value={updateInfo.latestVersion} />}
           </div>
 
           {updateInfo?.error && <p className="status-text error">{updateInfo.error}</p>}
+          {!updateInfo?.error && !updateInfo?.isUpdateAvailable && <p className="status-text">No update available.</p>}
           {updateInfo?.publishedAt && <p className="status-text">Published {new Date(updateInfo.publishedAt).toLocaleDateString()}</p>}
 
           <div className="about-actions">
@@ -994,6 +1011,17 @@ function LogEntry({ log }: { log: CommandLogEntry }): JSX.Element {
       <pre>{`${log.command} ${log.args.join(' ')}\n\nstdout:\n${log.stdout || '(empty)'}\n\nstderr:\n${log.stderr || '(empty)'}`}</pre>
     </details>
   )
+}
+
+function assertCommandSuccess(log: CommandLogEntry): void {
+  if (log.success) return
+  const output = [log.stderr, log.stdout].filter(Boolean).join('\n').trim()
+  throw new Error(output || `${log.label} failed with exit code ${log.exitCode ?? 'unknown'}.`)
+}
+
+function assertLogsSuccess(logs: CommandLogEntry[]): void {
+  const failed = logs.find((log) => !log.success)
+  if (failed) assertCommandSuccess(failed)
 }
 
 function formatBytes(bytes: number): string {
