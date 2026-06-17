@@ -186,6 +186,50 @@ const demoApi = {
       dangerous: false
     },
     {
+      id: 'browser-cache',
+      label: 'Browser cache: Edge/Chrome/Firefox',
+      description: 'Cache folders only, not bookmarks, passwords, history, or downloads.',
+      estimatedBytes: 724566016,
+      paths: ['%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Cache\\*'],
+      detected: true,
+      selectedByDefault: true,
+      requiresAdmin: false,
+      dangerous: false
+    },
+    {
+      id: 'launcher-caches',
+      label: 'Game launcher caches',
+      description: 'Epic, Battle.net, EA, Ubisoft, and Riot launcher cache folders only.',
+      estimatedBytes: 398458880,
+      paths: ['%LOCALAPPDATA%\\EpicGamesLauncher\\Saved\\webcache*\\*'],
+      detected: true,
+      selectedByDefault: true,
+      requiresAdmin: false,
+      dangerous: false
+    },
+    {
+      id: 'windows-update-downloads',
+      label: 'Windows Update download cache',
+      description: 'Downloaded update payload cache. Windows can download needed files again.',
+      estimatedBytes: 2159017984,
+      paths: ['%WINDIR%\\SoftwareDistribution\\Download\\*'],
+      detected: true,
+      selectedByDefault: false,
+      requiresAdmin: true,
+      dangerous: false
+    },
+    {
+      id: 'icon-cache',
+      label: 'Icon cache',
+      description: 'Windows Explorer icon cache files. Explorer may rebuild icons after cleanup.',
+      estimatedBytes: 91357184,
+      paths: ['%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\iconcache_*.db'],
+      detected: true,
+      selectedByDefault: true,
+      requiresAdmin: false,
+      dangerous: false
+    },
+    {
       id: 'dism-component-store',
       label: 'Component store cleanup',
       description: 'Runs DISM StartComponentCleanup. Needs admin and can take a while.',

@@ -1,6 +1,6 @@
 import { app, shell } from 'electron'
 import { spawn } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import os from 'os'
 import type {
@@ -398,6 +398,16 @@ export class OptimizerService {
         dryRun
       })
     }
+    if (target.id === 'recycle-bin') {
+      return this.runPowerShell('Clear-RecycleBin -Force -ErrorAction SilentlyContinue; "Recycle Bin emptied."', {
+        kind: 'clean',
+        label: 'Empty Recycle Bin',
+        dryRun
+      })
+    }
+    if (target.id === 'branch-cache') {
+      return this.runElevatedPowerShell('Clear-BCCache -Force -ErrorAction SilentlyContinue; "BranchCache cleared."', 'Clear BranchCache', dryRun, 'clean')
+    }
     if (target.id === 'store-cache') {
       return this.runCommand('wsreset.exe', [], { kind: 'clean', label: 'Reset Microsoft Store cache', dryRun })
     }
@@ -430,20 +440,29 @@ export class OptimizerService {
     return [
       target('windows-temp', 'Windows temp files', 'System temporary files under Windows\\Temp.', ['%WINDIR%\\Temp\\*'], false, true),
       target('user-temp', 'User temp files', 'Your user temp folder only. This never touches Documents, Desktop, Downloads, media, or saves.', ['%TEMP%\\*'], true, false),
-      target('recycle-bin', 'Recycle Bin', 'Empties the Recycle Bin after confirmation.', ['%SystemDrive%\\$Recycle.Bin\\*'], false, true, true),
+      commandTarget('recycle-bin', 'Recycle Bin', 'Empties the Recycle Bin with the Windows Clear-RecycleBin command.', false, true),
       target('delivery-cache', 'Delivery Optimization cache', 'Windows update peer/cache files.', ['%ProgramData%\\Microsoft\\Windows\\DeliveryOptimization\\Cache\\*'], false, true),
+      target('windows-update-downloads', 'Windows Update download cache', 'Downloaded update payload cache. Windows can download needed files again.', ['%WINDIR%\\SoftwareDistribution\\Download\\*'], false, true),
       target('directx-cache', 'DirectX shader cache', 'DirectX shader cache that games can rebuild.', ['%LOCALAPPDATA%\\D3DSCache\\*', '%LOCALAPPDATA%\\Microsoft\\DirectX Shader Cache\\*'], true, false),
       target('gpu-shader-cache', 'NVIDIA/AMD shader cache', 'Detected GPU driver shader caches. Games rebuild these after launch.', ['%LOCALAPPDATA%\\NVIDIA\\DXCache\\*', '%LOCALAPPDATA%\\NVIDIA\\GLCache\\*', '%ProgramData%\\NVIDIA Corporation\\NV_Cache\\*', '%LOCALAPPDATA%\\AMD\\DxCache\\*'], true, false),
       target('thumbnail-cache', 'Thumbnail cache', 'Windows Explorer thumbnail database files.', ['%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db'], true, false),
+      target('icon-cache', 'Icon cache', 'Windows Explorer icon cache files. Explorer may rebuild icons after cleanup.', ['%LOCALAPPDATA%\\IconCache.db', '%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\iconcache_*.db'], true, false),
       target('wer', 'Windows error reports', 'Windows Error Reporting archives and queues.', ['%LOCALAPPDATA%\\Microsoft\\Windows\\WER\\*', '%ProgramData%\\Microsoft\\Windows\\WER\\*'], true, false),
       target('crash-dumps', 'Crash dumps/minidumps', 'User crash dumps and Windows minidumps.', ['%LOCALAPPDATA%\\CrashDumps\\*', '%WINDIR%\\Minidump\\*'], false, true),
+      target('memory-dumps', 'Memory and kernel dumps', 'Large Windows MEMORY.DMP and LiveKernelReports dump files.', ['%WINDIR%\\MEMORY.DMP', '%WINDIR%\\LiveKernelReports\\*.dmp'], false, true),
       target('old-setup-logs', 'Old setup logs', 'Windows setup/log leftovers that are not personal files.', ['%WINDIR%\\Panther\\*', `%SystemDrive%\\Users\\${user}\\AppData\\Local\\Temp\\*.log`], false, true),
+      target('windows-logs', 'Windows CBS/DISM logs', 'Old component servicing logs. Useful for support, so not selected by default.', ['%WINDIR%\\Logs\\CBS\\*.log', '%WINDIR%\\Logs\\DISM\\*.log'], false, true),
+      target('prefetch', 'Windows Prefetch cache', 'Boot/app launch traces Windows rebuilds over time. Not selected by default.', ['%WINDIR%\\Prefetch\\*'], false, true),
       target('windows-old', 'Windows.old upgrade files', 'Large previous Windows installation folder if detected. Dangerous because rollback files are removed.', ['%SystemDrive%\\Windows.old\\*'], false, true, true),
       target('browser-cache', 'Browser cache: Edge/Chrome/Firefox', 'Cache folders only, not profiles, bookmarks, passwords, history, or downloads.', ['%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\Default\\Cache\\*', '%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default\\Cache\\*', '%APPDATA%\\Mozilla\\Firefox\\Profiles\\*\\cache2\\*'], true, false),
       target('steam-cache', 'Steam download/shader cache', 'Steam download cache and shader cache if Steam is detected.', steam.flatMap((root) => [`${root}\\appcache\\httpcache\\*`, `${root}\\steamapps\\shadercache\\*`]), true, false),
+      target('launcher-caches', 'Game launcher caches', 'Epic, Battle.net, EA, Ubisoft, and Riot launcher web/cache folders only.', ['%LOCALAPPDATA%\\EpicGamesLauncher\\Saved\\webcache*\\*', '%ProgramData%\\Battle.net\\Cache\\*', '%LOCALAPPDATA%\\Electronic Arts\\EA Desktop\\Cache\\*', '%LOCALAPPDATA%\\Ubisoft Game Launcher\\cache\\*', '%LOCALAPPDATA%\\Riot Games\\Riot Client\\Cache\\*'], true, false),
+      target('chat-media-caches', 'Chat/music app caches', 'Discord, Spotify, Teams, and Slack cache folders only.', ['%APPDATA%\\discord\\Cache\\*', '%APPDATA%\\discord\\Code Cache\\*', '%APPDATA%\\discord\\GPUCache\\*', '%LOCALAPPDATA%\\Spotify\\Storage\\*', '%APPDATA%\\Microsoft\\Teams\\Cache\\*', '%APPDATA%\\Slack\\Cache\\*'], true, false),
+      target('developer-caches', 'Developer caches', 'npm, pnpm, Yarn, pip, NuGet, Vite, and Electron builder caches. Not selected by default.', ['%LOCALAPPDATA%\\npm-cache\\_cacache\\*', '%LOCALAPPDATA%\\pnpm-store\\*', '%LOCALAPPDATA%\\Yarn\\Cache\\*', '%LOCALAPPDATA%\\pip\\Cache\\*', '%USERPROFILE%\\.nuget\\packages\\.tools\\*', '%LOCALAPPDATA%\\electron\\Cache\\*', '%LOCALAPPDATA%\\electron-builder\\Cache\\*'], false, false),
       commandTarget('cleanmgr-sageset', 'Disk Cleanup setup UI', 'Opens cleanmgr /sageset:1 so you can choose Windows cleanup categories honestly.', false),
       commandTarget('cleanmgr', 'Run Disk Cleanup profile', 'Runs cleanmgr /sagerun:1 using the categories you chose in sageset.', false),
       commandTarget('dism-component-store', 'Component store cleanup', 'Runs DISM StartComponentCleanup. Can take a while and needs admin.', true),
+      commandTarget('branch-cache', 'BranchCache', 'Clears Windows BranchCache if the feature is present. Needs admin.', true),
       commandTarget('store-cache', 'Microsoft Store cache', 'Runs wsreset.exe.', false),
       commandTarget('dns-cache', 'DNS cache flush', 'Runs ipconfig /flushdns.', false)
     ]
@@ -552,7 +571,7 @@ ${script
 [pscustomobject]@{ stdout = $out; stderr = $err; exitCode = $code } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '${escapePowerShellSingle(resultFile)}' -Encoding UTF8
 `
     writeFileSync(helperScript, wrapped, 'utf8')
-    const launch = await this.runCommand(
+    const launch = await this.runCommandRaw(
       'powershell.exe',
       [
         '-NoProfile',
@@ -561,7 +580,7 @@ ${script
         '-Command',
         `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${escapePowerShellSingle(helperScript)}')`
       ],
-      { kind, label, elevated: true }
+      true
     )
 
     let stdout = launch.stdout
@@ -576,6 +595,9 @@ ${script
       } catch {
         stderr += '\nUnable to parse elevated result file.'
       }
+    } else {
+      stderr = `${stderr}\nElevated action did not return a result. UAC may have been cancelled or blocked.`.trim()
+      exitCode = exitCode === 0 ? 1 : exitCode
     }
     return this.addLog({
       kind,
@@ -588,6 +610,22 @@ ${script
       success: exitCode === 0,
       dryRun: false,
       elevated: true
+    })
+  }
+
+  private async runCommandRaw(command: string, args: string[], elevated = false): Promise<Omit<CommandLogEntry, 'id' | 'timestamp' | 'kind' | 'label' | 'dryRun'>> {
+    return new Promise((resolve) => {
+      const child = spawn(command, args, { windowsHide: true })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk) => (stdout += chunk.toString()))
+      child.stderr.on('data', (chunk) => (stderr += chunk.toString()))
+      child.on('error', (error) => {
+        resolve({ command, args, stdout, stderr: `${stderr}${error.message}`, exitCode: 1, success: false, elevated })
+      })
+      child.on('close', (code) => {
+        resolve({ command, args, stdout, stderr, exitCode: code, success: code === 0, elevated })
+      })
     })
   }
 
@@ -737,7 +775,7 @@ function target(
   return { id, label, description, paths, estimatedBytes: 0, detected: false, selectedByDefault, requiresAdmin, dangerous }
 }
 
-function commandTarget(id: string, label: string, description: string, requiresAdmin: boolean): CleanTarget {
+function commandTarget(id: string, label: string, description: string, requiresAdmin: boolean, dangerous = false): CleanTarget {
   return {
     id,
     label,
@@ -747,7 +785,7 @@ function commandTarget(id: string, label: string, description: string, requiresA
     detected: true,
     selectedByDefault: false,
     requiresAdmin,
-    dangerous: false,
+    dangerous,
     commandOnly: true
   }
 }
@@ -760,15 +798,27 @@ function safeDeleteScript(paths: string[]): string {
   const safeRoots = [
     process.env.TEMP,
     process.env.LOCALAPPDATA,
+    process.env.APPDATA,
     process.env.ProgramData,
     process.env.WINDIR ? join(process.env.WINDIR, 'Temp') : undefined,
     process.env.WINDIR ? join(process.env.WINDIR, 'Minidump') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'LiveKernelReports') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'Logs', 'CBS') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'Logs', 'DISM') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'Prefetch') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'SoftwareDistribution', 'Download') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'Panther') : undefined,
+    process.env.WINDIR ? join(process.env.WINDIR, 'MEMORY.DMP') : undefined,
     process.env.SystemDrive ? `${process.env.SystemDrive}\\Windows.old` : undefined,
-    process.env.SystemDrive ? `${process.env.SystemDrive}\\$Recycle.Bin` : undefined
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, '.nuget', 'packages', '.tools') : undefined
   ]
     .filter(Boolean)
     .map((root) => String(root).toLowerCase())
-  const safePaths = paths.filter((path) => safeRoots.some((root) => path.toLowerCase().startsWith(root)))
+  const safePaths = paths.filter((path) => {
+    const lower = path.toLowerCase()
+    if (safeRoots.some((root) => lower.startsWith(root))) return true
+    return lower.includes('\\steam\\appcache\\httpcache') || lower.includes('\\steam\\steamapps\\shadercache')
+  })
   return [
     `$paths = ${JSON.stringify(safePaths)} | ConvertFrom-Json`,
     'foreach ($p in $paths) {',

@@ -668,6 +668,7 @@ td {
 
 .metric strong {
   font-size: 17px;
+  color: var(--text);
 }
 
 .spec-list {

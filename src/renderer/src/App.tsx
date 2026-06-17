@@ -430,7 +430,7 @@ function SystemPanel({
             <div className="panel gpu-card">
               <div className="gpu-top">
                 <div>
-                  <span className="muted">GPU-Z style card</span>
+                  <span className="muted">Graphics card</span>
                   <h2>{info.gpu.name}</h2>
                 </div>
                 <Monitor size={40} />
