@@ -157,6 +157,7 @@ export interface ApplyNvidiaProfileRequest {
   disableOverlay: boolean
   setGameMode: boolean
   disableGameDvr: boolean
+  disableDeliveryOptimization: boolean
 }
 
 export interface AppSettings {

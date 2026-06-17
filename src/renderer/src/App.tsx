@@ -48,6 +48,7 @@ import type {
 
 type TabId = 'tasks' | 'system' | 'cleaning' | 'nvidia' | 'logs' | 'about'
 type ThemeId = 'mint' | 'blue' | 'violet' | 'amber' | 'mono'
+type NvidiaActionKey = keyof Omit<ApplyNvidiaProfileRequest, 'profile'>
 
 const tabs: Array<{ id: TabId; label: string; icon: typeof Gauge }> = [
   { id: 'tasks', label: 'Tasks', icon: Gauge },
@@ -65,6 +66,14 @@ const themes: Array<{ id: ThemeId; label: string }> = [
   { id: 'amber', label: 'Amber' },
   { id: 'mono', label: 'Mono' }
 ]
+
+const nvidiaActionKeys: Record<string, NvidiaActionKey> = {
+  'patch-nvidia-resolution': 'patchNvidiaAppResolution',
+  'disable-overlay': 'disableOverlay',
+  'game-mode': 'setGameMode',
+  'disable-game-dvr': 'disableGameDvr',
+  'disable-delivery-optimization': 'disableDeliveryOptimization'
+}
 
 const defaultSettings: AppSettings = {
   preferredResolution: '2560x1440',
@@ -588,11 +597,12 @@ function NvidiaPanel({
 }): JSX.Element {
   const [state, setState] = useState<NvidiaState | null>(null)
   const [profile, setProfile] = useState<NvidiaProfile | null>(null)
-  const [actions, setActions] = useState({
+  const [actions, setActions] = useState<Record<NvidiaActionKey, boolean>>({
     patchNvidiaAppResolution: true,
     disableOverlay: true,
     setGameMode: true,
-    disableGameDvr: true
+    disableGameDvr: true,
+    disableDeliveryOptimization: false
   })
 
   useEffect(() => {
@@ -612,7 +622,7 @@ function NvidiaPanel({
     if (!profile) return
     const selectedActionLabels = state?.actions
       .filter((action) => {
-        const key = action.id === 'patch-nvidia-resolution' ? 'patchNvidiaAppResolution' : action.id === 'disable-overlay' ? 'disableOverlay' : action.id === 'game-mode' ? 'setGameMode' : 'disableGameDvr'
+        const key = nvidiaActionKeys[action.id]
         return actions[key]
       })
       .map((action) => `- ${action.label}`) ?? []
@@ -711,7 +721,7 @@ function NvidiaPanel({
               <Spec label="Patch scan" value={`${state?.patchStatus.patchedFiles ?? 0} patched / ${state?.patchStatus.unpatched4kFiles ?? 0} still 4K`} />
             </div>
             {state?.actions.map((action) => {
-              const key = action.id === 'patch-nvidia-resolution' ? 'patchNvidiaAppResolution' : action.id === 'disable-overlay' ? 'disableOverlay' : action.id === 'game-mode' ? 'setGameMode' : 'disableGameDvr'
+              const key = nvidiaActionKeys[action.id]
               return (
                 <label className="action-check" key={action.id}>
                   <input checked={actions[key]} onChange={(event) => setActions({ ...actions, [key]: event.target.checked })} type="checkbox" />

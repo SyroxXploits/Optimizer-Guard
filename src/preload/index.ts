@@ -296,6 +296,14 @@ const demoApi = {
         requiresAdmin: false,
         dangerous: false,
         status: 'Game DVR capture is disabled.'
+      },
+      {
+        id: 'disable-delivery-optimization',
+        label: 'Disable Delivery Optimization',
+        description: 'Sets DoSvc Start to 4 and stops the Delivery Optimization service.',
+        requiresAdmin: true,
+        dangerous: false,
+        status: 'Delivery Optimization Start=3, service Running.'
       }
     ],
     patchStatus: {

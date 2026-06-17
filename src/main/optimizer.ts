@@ -386,6 +386,16 @@ export class OptimizerService {
           requiresAdmin: false,
           dangerous: false,
           status: tweakState.gameDvrDisabled ? 'Game DVR capture is already disabled.' : 'Game DVR capture appears enabled or unset.'
+        },
+        {
+          id: 'disable-delivery-optimization',
+          label: 'Disable Delivery Optimization',
+          description: 'Sets HKLM\\SYSTEM\\CurrentControlSet\\Services\\DoSvc\\Start to 4 and stops DoSvc. This can reduce background network/disk activity, but may affect Microsoft Store and Windows update delivery behavior.',
+          requiresAdmin: true,
+          dangerous: false,
+          status: tweakState.deliveryOptimizationDisabled
+            ? `Delivery Optimization is already disabled (Start=${tweakState.deliveryOptimizationStart ?? 'unknown'}).`
+            : `Delivery Optimization Start=${tweakState.deliveryOptimizationStart ?? 'unknown'}, service ${tweakState.deliveryOptimizationStatus}.`
         }
       ],
       patchStatus
@@ -419,6 +429,9 @@ export class OptimizerService {
     }
     if (request.disableGameDvr) {
       logs.push(await this.runPowerShell(disableGameDvrScript(), { kind: 'nvidia', label: 'Disable Xbox Game DVR', dryRun }))
+    }
+    if (request.disableDeliveryOptimization) {
+      logs.push(await this.disableDeliveryOptimization(dryRun))
     }
     if (request.patchNvidiaAppResolution) {
       logs.push(await this.patchNvidiaAppResolution(request.profile.preferredResolution, dryRun))
@@ -608,20 +621,62 @@ export class OptimizerService {
     }
   }
 
-  private async queryGamingTweaksState(): Promise<{ overlayDisabled: boolean; gameDvrDisabled: boolean }> {
+  private async queryGamingTweaksState(): Promise<{
+    overlayDisabled: boolean
+    gameDvrDisabled: boolean
+    deliveryOptimizationDisabled: boolean
+    deliveryOptimizationStart: number | null
+    deliveryOptimizationStatus: string
+  }> {
     const script = [
       "$overlay = Get-ItemPropertyValue -Path 'HKCU:\\Software\\NVIDIA Corporation\\Global\\ShadowPlay' -Name 'EnableInGameOverlay' -ErrorAction SilentlyContinue",
       "$shadow = Get-ItemPropertyValue -Path 'HKCU:\\Software\\NVIDIA Corporation\\Global\\ShadowPlay' -Name 'ShadowPlayEnabled' -ErrorAction SilentlyContinue",
       "$dvr = Get-ItemPropertyValue -Path 'HKCU:\\System\\GameConfigStore' -Name 'GameDVR_Enabled' -ErrorAction SilentlyContinue",
       "$capture = Get-ItemPropertyValue -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR' -Name 'AppCaptureEnabled' -ErrorAction SilentlyContinue",
-      "[pscustomobject]@{ overlayDisabled = (($overlay -eq 0 -or $null -eq $overlay) -and ($shadow -eq 0 -or $null -eq $shadow)); gameDvrDisabled = (($dvr -eq 0 -or $null -eq $dvr) -and ($capture -eq 0 -or $null -eq $capture)) } | ConvertTo-Json -Compress"
+      "$dosvcStart = Get-ItemPropertyValue -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DoSvc' -Name 'Start' -ErrorAction SilentlyContinue",
+      "$dosvc = Get-Service -Name 'DoSvc' -ErrorAction SilentlyContinue",
+      "[pscustomobject]@{ overlayDisabled = (($overlay -eq 0 -or $null -eq $overlay) -and ($shadow -eq 0 -or $null -eq $shadow)); gameDvrDisabled = (($dvr -eq 0 -or $null -eq $dvr) -and ($capture -eq 0 -or $null -eq $capture)); deliveryOptimizationDisabled = ($dosvcStart -eq 4); deliveryOptimizationStart = $dosvcStart; deliveryOptimizationStatus = if ($dosvc) { [string]$dosvc.Status } else { 'Unknown' } } | ConvertTo-Json -Compress"
     ].join('\n')
     const result = await this.runPowerShell(script, { kind: 'nvidia', label: 'Inspect Windows/NVIDIA gaming tweak state' })
     try {
-      return JSON.parse(result.stdout.trim()) as { overlayDisabled: boolean; gameDvrDisabled: boolean }
+      return JSON.parse(result.stdout.trim()) as {
+        overlayDisabled: boolean
+        gameDvrDisabled: boolean
+        deliveryOptimizationDisabled: boolean
+        deliveryOptimizationStart: number | null
+        deliveryOptimizationStatus: string
+      }
     } catch {
-      return { overlayDisabled: false, gameDvrDisabled: false }
+      return {
+        overlayDisabled: false,
+        gameDvrDisabled: false,
+        deliveryOptimizationDisabled: false,
+        deliveryOptimizationStart: null,
+        deliveryOptimizationStatus: 'Unknown'
+      }
     }
+  }
+
+  private async disableDeliveryOptimization(dryRun: boolean): Promise<CommandLogEntry> {
+    const state = await this.queryGamingTweaksState()
+    const originalStart = Number.isFinite(Number(state.deliveryOptimizationStart)) ? Number(state.deliveryOptimizationStart) : 3
+    const log = await this.runElevatedPowerShell(disableDeliveryOptimizationScript(), 'Disable Delivery Optimization service', dryRun, 'nvidia')
+    if (log.success && !dryRun) {
+      const restoreScript = [
+        "$path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DoSvc'",
+        `Set-ItemProperty -Path $path -Name 'Start' -Type DWord -Value ${originalStart}`,
+        `if (${originalStart} -ne 4) { Start-Service -Name 'DoSvc' -ErrorAction SilentlyContinue }`,
+        `"Delivery Optimization Start restored to ${originalStart}."`
+      ].join('\n')
+      this.addRestore({
+        kind: 'registry',
+        label: `Undo: restore Delivery Optimization Start=${originalStart}`,
+        command: 'powershell.exe',
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', restoreScript],
+        elevated: true
+      })
+    }
+    return log
   }
 
   private async queryPerCoreUsage(): Promise<number[]> {
@@ -1079,6 +1134,17 @@ Set-ItemProperty -Path 'HKCU:\\System\\GameConfigStore' -Name 'GameDVR_Enabled' 
 New-Item -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR' -Force | Out-Null
 Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR' -Name 'AppCaptureEnabled' -Type DWord -Value 0
 'Xbox Game DVR capture disabled.'
+`
+}
+
+function disableDeliveryOptimizationScript(): string {
+  return `
+$path = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\DoSvc'
+$previous = Get-ItemPropertyValue -Path $path -Name 'Start' -ErrorAction Stop
+Set-ItemProperty -Path $path -Name 'Start' -Type DWord -Value 4
+Stop-Service -Name 'DoSvc' -Force -ErrorAction SilentlyContinue
+$current = Get-ItemPropertyValue -Path $path -Name 'Start' -ErrorAction Stop
+"Delivery Optimization disabled. Previous Start=$previous; Current Start=$current."
 `
 }
 
