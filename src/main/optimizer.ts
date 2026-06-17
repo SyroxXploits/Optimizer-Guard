@@ -802,35 +802,44 @@ export class OptimizerService {
   }
 
   private runPowerShell(script: string, options: CommandOptions): Promise<CommandLogEntry> {
-    return this.runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(script)], options)
+    return this.runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(powerShellPrelude(script))], options)
   }
 
   private async runElevatedPowerShell(script: string, label: string, _dryRun: boolean, kind: CommandLogEntry['kind']): Promise<CommandLogEntry> {
-    const workDir = join(this.dataDir, 'elevated')
+    const sharedRoot = process.env.ProgramData ? join(process.env.ProgramData, 'Optimizer Guard') : this.dataDir
+    const workDir = join(sharedRoot, 'elevated')
     mkdirSync(workDir, { recursive: true })
-    const resultFile = join(workDir, `${Date.now()}-${Math.random().toString(16).slice(2)}.json`)
-    const helperScript = join(workDir, `${Date.now()}-helper.ps1`)
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const resultFile = join(workDir, `${id}.json`)
+    const helperScript = join(workDir, `${id}-helper.ps1`)
+    const payloadScript = join(workDir, `${id}-payload.ps1`)
+    const stdoutFile = join(workDir, `${id}.out.txt`)
+    const stderrFile = join(workDir, `${id}.err.txt`)
     const escapedResultFile = escapePowerShellSingle(resultFile)
     const escapedHelperScript = escapePowerShellSingle(helperScript)
+    const escapedPayloadScript = escapePowerShellSingle(payloadScript)
+    const escapedStdoutFile = escapePowerShellSingle(stdoutFile)
+    const escapedStderrFile = escapePowerShellSingle(stderrFile)
     const wrapped = `
+$ProgressPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$VerbosePreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
 $out = ''
 $err = ''
 $code = 0
 try {
-  $out = & {
-${script
-  .split('\n')
-  .map((line) => `    ${line}`)
-  .join('\n')}
-  } 2>&1 | Out-String
-  if ($LASTEXITCODE -ne $null) { $code = $LASTEXITCODE }
+  $process = Start-Process -FilePath 'powershell.exe' -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '${escapedPayloadScript}') -RedirectStandardOutput '${escapedStdoutFile}' -RedirectStandardError '${escapedStderrFile}'
+  $code = if ($null -ne $process.ExitCode) { [int]$process.ExitCode } else { 0 }
 } catch {
   $err = $_ | Out-String
   $code = 1
 }
+if (Test-Path -LiteralPath '${escapedStdoutFile}') { $out = Get-Content -LiteralPath '${escapedStdoutFile}' -Raw -ErrorAction SilentlyContinue }
+if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String) + (Get-Content -LiteralPath '${escapedStderrFile}' -Raw -ErrorAction SilentlyContinue)).Trim() }
 [pscustomobject]@{ stdout = $out; stderr = $err; exitCode = $code } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '${escapedResultFile}' -Encoding UTF8
 `
+    writeFileSync(payloadScript, powerShellPrelude(script), 'utf8')
     writeFileSync(helperScript, wrapped, 'utf8')
     const launchScript = [
       `$helper = '${escapedHelperScript}'`,
@@ -961,7 +970,13 @@ ${script
   }
 
   private addLog(entry: Omit<CommandLogEntry, 'id' | 'timestamp'>): CommandLogEntry {
-    const full = { id: cryptoId(), timestamp: new Date().toISOString(), ...entry }
+    const full = {
+      id: cryptoId(),
+      timestamp: new Date().toISOString(),
+      ...entry,
+      stdout: cleanPowerShellOutput(entry.stdout),
+      stderr: cleanPowerShellOutput(entry.stderr)
+    }
     this.logs.push(full)
     this.writeJson(this.logFile, this.logs.slice(-1000))
     return full
@@ -1105,6 +1120,23 @@ function normalizeTaskPath(taskPath: string): string {
   const trimmed = taskPath.trim().replace(/\//g, '\\')
   if (!trimmed) return trimmed
   return trimmed.startsWith('\\') ? trimmed : `\\${trimmed}`
+}
+
+function powerShellPrelude(script: string): string {
+  return [
+    "$ProgressPreference = 'SilentlyContinue'",
+    "$InformationPreference = 'SilentlyContinue'",
+    "$VerbosePreference = 'SilentlyContinue'",
+    script
+  ].join('\n')
+}
+
+function cleanPowerShellOutput(output: string): string {
+  if (!output || !output.includes('#< CLIXML')) return output
+  return output
+    .replace(/#< CLIXML[\s\S]*?(?=(?:\r?\n(?!<))|$)/g, 'PowerShell progress output suppressed.')
+    .replace(/<Objs[\s\S]*<\/Objs>/g, 'PowerShell progress output suppressed.')
+    .trim()
 }
 
 function safeDeleteScript(paths: string[]): string {
