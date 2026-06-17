@@ -31,6 +31,16 @@ interface CommandOptions {
   elevated?: boolean
 }
 
+interface TaskVerification {
+  matches: boolean
+  found: boolean
+  enabled: boolean | null
+  state: string
+  source: string
+  stdout: string
+  stderr: string
+}
+
 const defaultSettings: AppSettings = {
   preferredResolution: '2560x1440',
   lastTab: 'tasks'
@@ -215,28 +225,44 @@ export class OptimizerService {
       dryRun
     })
 
-    if (!log.success || !(await this.verifyTaskState(normalizedTaskPath, enable))) {
+    let verification = await this.verifyTaskState(normalizedTaskPath, enable)
+    if (!log.success || !verification.matches) {
       const script = taskStateScript(normalizedTaskPath, enable)
       log = await this.runPowerShell(script, {
         kind: 'task',
         label: `${enable ? 'Enable' : 'Disable'} scheduled task ${normalizedTaskPath} via ScheduledTasks`,
         dryRun
       })
+      verification = await this.verifyTaskState(normalizedTaskPath, enable)
     }
 
-    if (!log.success || !(await this.verifyTaskState(normalizedTaskPath, enable))) {
+    if (!log.success || !verification.matches) {
       const elevatedScript = taskStateScript(normalizedTaskPath, enable)
       log = await this.runElevatedPowerShell(elevatedScript, `${enable ? 'Enable' : 'Disable'} scheduled task ${normalizedTaskPath}`, dryRun, 'task')
+      verification = await this.verifyTaskState(normalizedTaskPath, enable)
     }
 
-    if (log.success && !(await this.verifyTaskState(normalizedTaskPath, enable))) {
+    if (log.success && !verification.matches) {
       log = this.addLog({
         kind: 'task',
         label: `Verify scheduled task ${normalizedTaskPath}`,
-        command: 'schtasks.exe',
-        args: ['/query', '/TN', normalizedTaskPath, '/fo', 'CSV', '/v'],
-        stdout: `Expected task to be ${enable ? 'enabled' : 'disabled'}, but Windows reported a different state.`,
-        stderr: '',
+        command: 'powershell.exe',
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', taskStateQueryScript(normalizedTaskPath)],
+        stdout: [
+          `Expected task to be ${enable ? 'enabled' : 'disabled'}, but Windows reported ${verification.found ? verification.state : 'not found'}.`,
+          `Verification source: ${verification.source}.`,
+          verification.enabled === null ? 'Detected enabled: unknown.' : `Detected enabled: ${verification.enabled}.`,
+          'Last action stdout:',
+          log.stdout || '(empty)'
+        ].join('\n'),
+        stderr: [
+          verification.stderr,
+          'Last action stderr:',
+          log.stderr || '(empty)',
+          updaterTaskHint(normalizedTaskPath)
+        ]
+          .filter(Boolean)
+          .join('\n'),
         exitCode: 1,
         success: false,
         dryRun: false,
@@ -259,11 +285,39 @@ export class OptimizerService {
     return log
   }
 
-  private async verifyTaskState(taskPath: string, enabled: boolean): Promise<boolean> {
+  private async verifyTaskState(taskPath: string, enabled: boolean): Promise<TaskVerification> {
     const normalizedTaskPath = normalizeTaskPath(taskPath)
-    const tasks = await this.queryTasks()
-    const task = tasks.find((item) => normalizeTaskPath(item.path).toLowerCase() === normalizedTaskPath.toLowerCase())
-    return task ? task.enabled === enabled : false
+    const result = await this.runPowerShell(taskStateQueryScript(normalizedTaskPath), {
+      kind: 'task',
+      label: `Verify exact scheduled task ${normalizedTaskPath}`
+    })
+
+    try {
+      const parsed = JSON.parse(result.stdout.trim()) as { found?: boolean; enabled?: boolean | null; state?: string; source?: string }
+      const detectedEnabled = typeof parsed.enabled === 'boolean' ? parsed.enabled : null
+      return {
+        matches: detectedEnabled === enabled,
+        found: Boolean(parsed.found),
+        enabled: detectedEnabled,
+        state: String(parsed.state ?? 'Unknown'),
+        source: String(parsed.source ?? 'Get-ScheduledTask'),
+        stdout: result.stdout,
+        stderr: result.stderr
+      }
+    } catch {
+      const tasks = await this.queryTasks()
+      const task = tasks.find((item) => normalizeTaskPath(item.path).toLowerCase() === normalizedTaskPath.toLowerCase())
+      const detectedEnabled = task ? task.enabled : null
+      return {
+        matches: detectedEnabled === enabled,
+        found: Boolean(task),
+        enabled: detectedEnabled,
+        state: task?.status ?? 'Unknown',
+        source: 'task table fallback',
+        stdout: result.stdout,
+        stderr: [result.stderr, 'Unable to parse exact task verification JSON.'].filter(Boolean).join('\n')
+      }
+    }
   }
 
   async queryFeatures(): Promise<FeatureToggle[]> {
@@ -1341,6 +1395,65 @@ if (-not $stateMatches) {
   exit 1
 }
 `
+}
+
+function taskStateQueryScript(taskPath: string): string {
+  const task = escapePowerShellSingle(taskPath)
+  return `
+$fullPath = '${task}'
+$taskName = Split-Path -Leaf $fullPath
+$taskPath = Split-Path -Parent $fullPath
+if ([string]::IsNullOrWhiteSpace($taskPath) -or $taskPath -eq '\\') {
+  $taskPath = '\\'
+} else {
+  $taskPath = ($taskPath.TrimEnd('\\') + '\\')
+}
+try {
+  $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+  $state = [string]$task.State
+  [pscustomobject]@{
+    found = $true
+    enabled = ($state -ne 'Disabled')
+    state = $state
+    source = 'Get-ScheduledTask'
+  } | ConvertTo-Json -Compress
+} catch {
+  $query = & schtasks.exe /Query /TN $fullPath /FO LIST /V 2>&1
+  $text = ($query | Out-String)
+  if ($LASTEXITCODE -ne 0) {
+    [pscustomobject]@{
+      found = $false
+      enabled = $null
+      state = 'Unknown'
+      source = 'schtasks.exe'
+      error = $text.Trim()
+    } | ConvertTo-Json -Compress
+    exit 0
+  }
+  $disabled = $text -match '(?im)^\\s*Status\\s*:\\s*Disabled\\s*$'
+  $stateLine = [regex]::Match($text, '(?im)^\\s*Status\\s*:\\s*(.+)$')
+  [pscustomobject]@{
+    found = $true
+    enabled = (-not $disabled)
+    state = if ($stateLine.Success) { $stateLine.Groups[1].Value.Trim() } else { 'Unknown' }
+    source = 'schtasks.exe'
+  } | ConvertTo-Json -Compress
+}
+`
+}
+
+function updaterTaskHint(taskPath: string): string {
+  const lower = taskPath.toLowerCase()
+  if (lower.includes('microsoftedgeupdatetask')) {
+    return 'Hint: Microsoft Edge Update services can recreate or re-enable Edge update tasks. If the command succeeds but the task immediately returns enabled, the updater service is likely repairing it.'
+  }
+  if (lower.includes('onedrive')) {
+    return 'Hint: OneDrive can recreate per-user/per-machine update tasks while OneDrive is installed or running.'
+  }
+  if (lower.includes('adob') || lower.includes('acrobat')) {
+    return 'Hint: Adobe updater services can recreate update tasks after app launch or service restart.'
+  }
+  return ''
 }
 
 function hyperVStateScript(): string {
