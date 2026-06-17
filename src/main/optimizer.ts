@@ -810,7 +810,7 @@ export class OptimizerService {
   }
 
   private async runElevatedPowerShell(script: string, label: string, _dryRun: boolean, kind: CommandLogEntry['kind']): Promise<CommandLogEntry> {
-    const sharedRoot = process.env.ProgramData ? join(process.env.ProgramData, 'Optimizer Guard') : this.dataDir
+    const sharedRoot = process.env.ProgramData ? join(process.env.ProgramData, 'OptimizerGuard') : this.dataDir
     const workDir = join(sharedRoot, 'elevated')
     mkdirSync(workDir, { recursive: true })
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -1290,6 +1290,7 @@ function taskStateScript(taskPath: string, enable: boolean): string {
   const task = escapePowerShellSingle(taskPath)
   return `
 $fullPath = '${task}'
+$desiredEnabled = '${enable ? '1' : '0'}' -eq '1'
 $taskName = Split-Path -Leaf $fullPath
 $taskPath = Split-Path -Parent $fullPath
 if ([string]::IsNullOrWhiteSpace($taskPath) -or $taskPath -eq '\\') {
@@ -1297,18 +1298,48 @@ if ([string]::IsNullOrWhiteSpace($taskPath) -or $taskPath -eq '\\') {
 } else {
   $taskPath = ($taskPath.TrimEnd('\\') + '\\')
 }
-$task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
-if ('${enable ? '1' : '0'}' -eq '0') {
-  try { Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue } catch {}
-  $task | Disable-ScheduledTask -ErrorAction Stop | Out-Null
-} else {
-  $task | Enable-ScheduledTask -ErrorAction Stop | Out-Null
+$errors = New-Object System.Collections.Generic.List[string]
+try {
+  $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+  if (-not $desiredEnabled) {
+    try { Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue } catch {}
+    try { & schtasks.exe /End /TN $fullPath 2>$null | Out-Null } catch {}
+    $task | Disable-ScheduledTask -ErrorAction Stop | Out-Null
+  } else {
+    $task | Enable-ScheduledTask -ErrorAction Stop | Out-Null
+  }
+} catch {
+  $errors.Add("ScheduledTasks API failed: $($_.Exception.Message)")
 }
-$updated = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
-$state = [string]$updated.State
+
+$updated = $null
+try { $updated = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop } catch {}
+$state = if ($null -ne $updated) { [string]$updated.State } else { 'Unknown' }
+$stateMatches = if ($desiredEnabled) { $state -ne 'Disabled' } else { $state -eq 'Disabled' }
+
+if (-not $stateMatches) {
+  $action = if ($desiredEnabled) { '/Enable' } else { '/Disable' }
+  try {
+    if (-not $desiredEnabled) { try { & schtasks.exe /End /TN $fullPath 2>$null | Out-Null } catch {} }
+    $schtasksOutput = & schtasks.exe /Change /TN $fullPath $action 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      $errors.Add("schtasks.exe failed with exit code $LASTEXITCODE - $($schtasksOutput -join [Environment]::NewLine)")
+    }
+  } catch {
+    $errors.Add("schtasks.exe threw: $($_.Exception.Message)")
+  }
+}
+
+$updated = $null
+try { $updated = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop } catch {}
+$state = if ($null -ne $updated) { [string]$updated.State } else { 'Unknown' }
+$stateMatches = if ($desiredEnabled) { $state -ne 'Disabled' } else { $state -eq 'Disabled' }
 "Scheduled task $fullPath is now $state."
-if ('${enable ? '1' : '0'}' -eq '1' -and $state -eq 'Disabled') { exit 1 }
-if ('${enable ? '1' : '0'}' -eq '0' -and $state -ne 'Disabled') { exit 1 }
+if (-not $stateMatches) {
+  if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ } }
+  Write-Error "Expected task to be $(if ($desiredEnabled) { 'enabled' } else { 'disabled' }), but Windows still reports $state."
+  exit 1
+}
 `
 }
 
