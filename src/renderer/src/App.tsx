@@ -24,6 +24,7 @@ import {
   Search,
   Shield,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   TerminalSquare,
   Trash2,
@@ -44,21 +45,23 @@ import type {
 } from '../../shared/types'
 
 type TabId = 'tasks' | 'system' | 'cleaning' | 'nvidia' | 'logs' | 'about'
-type ThemeId = 'aurora' | 'graphite' | 'ember'
+type ThemeId = 'mint' | 'blue' | 'violet' | 'amber' | 'mono'
 
 const tabs: Array<{ id: TabId; label: string; icon: typeof Gauge }> = [
-  { id: 'tasks', label: 'Task Disabler', icon: Gauge },
-  { id: 'system', label: 'System / BIOS Info', icon: Cpu },
+  { id: 'tasks', label: 'Tasks', icon: Gauge },
+  { id: 'system', label: 'System', icon: Cpu },
   { id: 'cleaning', label: 'Cleaning', icon: Eraser },
-  { id: 'nvidia', label: 'NVIDIA / DLSS Suggestions', icon: Sparkles },
-  { id: 'logs', label: 'Logs / Restore', icon: DatabaseBackup },
-  { id: 'about', label: 'About / Updates', icon: Github }
+  { id: 'nvidia', label: 'NVIDIA', icon: Sparkles },
+  { id: 'logs', label: 'Logs', icon: DatabaseBackup },
+  { id: 'about', label: 'About', icon: Info }
 ]
 
 const themes: Array<{ id: ThemeId; label: string }> = [
-  { id: 'aurora', label: 'Aurora' },
-  { id: 'graphite', label: 'Graphite' },
-  { id: 'ember', label: 'Ember' }
+  { id: 'mint', label: 'Mint' },
+  { id: 'blue', label: 'Blue' },
+  { id: 'violet', label: 'Violet' },
+  { id: 'amber', label: 'Amber' },
+  { id: 'mono', label: 'Mono' }
 ]
 
 const defaultSettings: AppSettings = {
@@ -74,7 +77,10 @@ function App(): JSX.Element {
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('Ready. Dry-run is on, so the first pass is safe.')
   const [version, setVersion] = useState('')
-  const [theme, setTheme] = useState<ThemeId>(() => (localStorage.getItem('optimizer-theme') as ThemeId) || 'aurora')
+  const [theme, setTheme] = useState<ThemeId>(() => {
+    const saved = localStorage.getItem('optimizer-theme') as ThemeId | null
+    return themes.some((item) => item.id === saved) ? saved! : 'mint'
+  })
 
   useEffect(() => {
     void bootstrap()
@@ -130,10 +136,12 @@ function App(): JSX.Element {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">OG</div>
+          <div className="brand-mark">
+            <ShieldCheck size={25} />
+          </div>
           <div>
             <span>Optimizer Guard</span>
-            <small>Safe PC tuning</small>
+            <small>PC tuning toolkit</small>
           </div>
         </div>
         <nav>
@@ -164,11 +172,6 @@ function App(): JSX.Element {
             ))}
           </div>
         </div>
-        <div className="safety-card">
-          <ShieldAlert size={20} />
-          <strong>Guard rails active</strong>
-          <span>No Defender, firewall, Windows Update, personal folders, or game saves are touched by default.</span>
-        </div>
       </aside>
 
       <main className="content">
@@ -177,10 +180,6 @@ function App(): JSX.Element {
             <span className="pill live">v{version || 'dev'}</span>
             <span className="muted">{notice}</span>
           </div>
-          <button className="ghost-link" onClick={() => void window.optimizerGuard.openExternal('https://github.com/SyroxXploits/Optimizer-Guard')}>
-            <Github size={15} />
-            GitHub
-          </button>
           <label className="dry-toggle">
             <input
               type="checkbox"
@@ -283,9 +282,9 @@ function TaskDisabler({
   return (
     <section className="page">
       <PageHero
-        eyebrow="Startup and background automation"
-        title="Disable noisy tasks without nuking Windows security."
-        text="Uses schtasks /query /fo CSV /v, parses the result, and logs every enable/disable action with restore history."
+        eyebrow="Scheduled tasks"
+        title="Find and toggle startup/background tasks."
+        text="Search, filter, preview, and restore task changes."
         icon={<Gauge />}
       />
 
@@ -305,7 +304,7 @@ function TaskDisabler({
         </button>
       </div>
 
-      <div className="feature-row">
+      <div className="feature-row compact-row">
         {features.map((feature) => (
           <div className="feature-card" key={feature.id}>
             <div>
@@ -327,7 +326,7 @@ function TaskDisabler({
         ))}
       </div>
 
-      <div className="table-card">
+      <div className="table-card task-table-card">
         <div className="table-head">
           <span>{filtered.length} shown</span>
           <span>{snapshot?.restoreHistory.filter((item) => item.kind === 'task' && !item.applied).length ?? 0} task restore points</span>
@@ -390,9 +389,9 @@ function SystemPanel({
   return (
     <section className="page">
       <PageHero
-        eyebrow="Hardware truth table"
-        title="Find the bottleneck suspects before changing random toggles."
-        text="Reads BIOS, board, CPU, GPU, display, Game Mode, HAGS, Resizable BAR, live CPU usage, and NVIDIA driver data."
+        eyebrow="System"
+        title="Hardware and Windows gaming state."
+        text="BIOS, board, CPU, GPU, display, Game Mode, HAGS, Resizable BAR, and live usage."
         icon={<Cpu />}
       />
       <button className="primary" onClick={() => void load()}>
@@ -479,6 +478,7 @@ function CleaningPanel({
 }): JSX.Element {
   const [targets, setTargets] = useState<CleanTarget[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const selectedBytes = targets.reduce((sum, target) => (selected.has(target.id) ? sum + target.estimatedBytes : sum), 0)
 
   async function scan(): Promise<void> {
     const result = await runBusy('Scanning safe cleanup locations...', () => window.optimizerGuard.scanCleaning(), 'Scan complete. Select targets, then clean selected.')
@@ -504,8 +504,8 @@ function CleaningPanel({
     <section className="page">
       <PageHero
         eyebrow="Scan first, clean second"
-        title="Free space without touching personal files."
-        text="The cleaner estimates space first, requires explicit selection, and avoids Downloads, Documents, Desktop, Pictures, Videos, and game saves."
+        title="Clean safe cache targets only."
+        text="Scan, review sizes, select targets, then clean. Personal folders and game saves are excluded."
         icon={<Trash2 />}
       />
       <div className="toolbar">
@@ -517,7 +517,7 @@ function CleaningPanel({
           <Trash2 size={16} />
           Clean selected
         </button>
-        <span className="pill">{formatBytes(targets.reduce((sum, target) => (selected.has(target.id) ? sum + target.estimatedBytes : sum), 0))} selected</span>
+        <span className="pill">{selectedBytes > 0 ? `${formatBytes(selectedBytes)} selected` : 'Nothing selected'}</span>
       </div>
       <div className="clean-grid">
         {targets.map((target) => (
@@ -535,7 +535,7 @@ function CleaningPanel({
             <div>
               <strong>{target.label}</strong>
               <p>{target.description}</p>
-              <span className="muted">{target.commandOnly ? 'Command action' : formatBytes(target.estimatedBytes)}</span>
+              <span className="muted">{cleanSizeLabel(target)}</span>
               {target.requiresAdmin && (
                 <span className="pill warn">
                   <Shield size={13} />
@@ -602,9 +602,9 @@ function NvidiaPanel({
   return (
     <section className="page">
       <PageHero
-        eyebrow="NVIDIA App resolution fixer"
-        title="Make 1440p the default target and tune DLSS intentionally."
-        text="You can choose DLSS mode, preset style, Reflex, use-case, and apply safe Windows/NVIDIA actions. Game files are never force-edited."
+        eyebrow="NVIDIA"
+        title="Resolution, DLSS, and gaming toggles."
+        text="Detects current screen resolution, suggests DLSS, and applies selected safe tweaks."
         icon={<Sparkles />}
       />
       <div className="toolbar">
@@ -624,7 +624,7 @@ function NvidiaPanel({
             <h2>Suggested profile</h2>
             <div className="form-grid">
               <Select label="Preferred resolution" value={profile.preferredResolution} onChange={(value) => update('preferredResolution', value)}>
-                {['1920x1080', '2560x1440', '3440x1440', '3840x2160'].map((item) => (
+                {uniqueOptions([profile.detectedResolution, '1920x1080', '2560x1440', '3440x1440', '3840x2160']).map((item) => (
                   <option key={item}>{item}</option>
                 ))}
               </Select>
@@ -717,8 +717,8 @@ function LogsPanel({
     <section className="page">
       <PageHero
         eyebrow="Audit trail"
-        title="Every command, output, preview, and restore point is kept."
-        text="Use this page to inspect command output, open the local log file, export settings, or undo changes made by the app."
+        title="Logs and restore points."
+        text="Inspect command output, export history, and undo supported changes."
         icon={<TerminalSquare />}
       />
       <div className="toolbar">
@@ -805,7 +805,9 @@ function AboutPanel({
 
       <div className="about-grid">
         <div className="panel about-card">
-          <div className="about-logo">OG</div>
+          <div className="about-logo">
+            <ShieldCheck size={36} />
+          </div>
           <h2>Optimizer Guard</h2>
           <p>Version {version || 'dev'}</p>
           <div className="about-actions">
@@ -940,7 +942,7 @@ function LogEntry({ log }: { log: CommandLogEntry }): JSX.Element {
 }
 
 function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
+  if (!bytes) return '0 bytes'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let value = bytes
   let index = 0
@@ -949,6 +951,16 @@ function formatBytes(bytes: number): string {
     index += 1
   }
   return `${value.toFixed(index < 2 ? 0 : 2)} ${units[index]}`
+}
+
+function cleanSizeLabel(target: CleanTarget): string {
+  if (target.commandOnly) return 'Command'
+  if (!target.detected || target.estimatedBytes <= 0) return 'No files found'
+  return formatBytes(target.estimatedBytes)
+}
+
+function uniqueOptions(options: string[]): string[] {
+  return [...new Set(options.filter(Boolean))]
 }
 
 export default App

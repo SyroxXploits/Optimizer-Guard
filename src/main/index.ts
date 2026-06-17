@@ -55,12 +55,12 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
   await wait(1200)
 
   const shots = [
-    { tab: 'Task Disabler', file: 'task-disabler.png' },
-    { tab: 'System / BIOS Info', file: 'system-info.png' },
+    { tab: 'Tasks', file: 'task-disabler.png' },
+    { tab: 'System', file: 'system-info.png' },
     { tab: 'Cleaning', file: 'cleaning.png', before: "document.querySelector('.primary')?.click()" },
-    { tab: 'NVIDIA / DLSS Suggestions', file: 'nvidia-dlss.png' },
-    { tab: 'Logs / Restore', file: 'logs-restore.png' },
-    { tab: 'About / Updates', file: 'about-updates.png' }
+    { tab: 'NVIDIA', file: 'nvidia-dlss.png' },
+    { tab: 'Logs', file: 'logs-restore.png' },
+    { tab: 'About', file: 'about-updates.png' }
   ]
 
   for (const shot of shots) {

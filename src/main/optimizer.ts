@@ -238,11 +238,14 @@ export class OptimizerService {
   async scanCleaningTargets(): Promise<CleanTarget[]> {
     const targets = this.getCleanDefinitions()
     const scanned = await Promise.all(
-      targets.map(async (target) => ({
-        ...target,
-        estimatedBytes: target.commandOnly ? 0 : await this.estimatePaths(target.paths),
-        detected: target.commandOnly ? true : target.paths.some((path) => existsSync(expandEnv(path)))
-      }))
+      targets.map(async (target) => {
+        const estimatedBytes = target.commandOnly ? 0 : await this.estimatePaths(target.paths)
+        return {
+          ...target,
+          estimatedBytes,
+          detected: target.commandOnly ? true : estimatedBytes > 0
+        }
+      })
     )
     return scanned
   }
@@ -256,7 +259,7 @@ export class OptimizerService {
       if (target.commandOnly) {
         logs.push(await this.runCleaningCommand(target, dryRun))
       } else {
-        const expandedPaths = target.paths.map(expandEnv).filter((path) => existsSync(path))
+        const expandedPaths = target.paths.map(expandEnv)
         const script = safeDeleteScript(expandedPaths)
         const run = target.requiresAdmin
           ? await this.runElevatedPowerShell(script, `Clean ${target.label}`, dryRun, 'clean')
@@ -273,13 +276,14 @@ export class OptimizerService {
   async queryNvidiaState(): Promise<NvidiaState> {
     const system = await this.querySystemInfo()
     const primary = system.displays.find((display) => display.primary) ?? system.displays[0]
-    const width = primary?.width ?? 2560
-    const height = primary?.height ?? 1440
-    const preferredResolution = this.settings.preferredResolution || `${width}x${height}`
+    const width = primary?.width || 2560
+    const height = primary?.height || 1440
+    const detectedResolution = `${width}x${height}`
+    const preferredResolution = detectedResolution
     const profile: NvidiaProfile = {
       gpuName: system.gpu.name,
       driverVersion: system.gpu.driverVersion,
-      detectedResolution: `${width}x${height}`,
+      detectedResolution,
       preferredResolution,
       dlssMode: recommendDlss(width, height),
       dlssPreset: 'Transformer if available',
@@ -469,8 +473,10 @@ export class OptimizerService {
   }
 
   private async estimatePaths(paths: string[]): Promise<number> {
+    const json = JSON.stringify(paths.map(expandEnv))
     const script = [
-      `$paths = ${JSON.stringify(paths.map(expandEnv))} | ConvertFrom-Json`,
+      `$pathsJson = @'\n${json}\n'@`,
+      '$paths = $pathsJson | ConvertFrom-Json',
       '$total = 0',
       'foreach ($p in $paths) {',
       '  Get-ChildItem -Path $p -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { if (-not $_.PSIsContainer) { $total += $_.Length } }',
@@ -819,8 +825,10 @@ function safeDeleteScript(paths: string[]): string {
     if (safeRoots.some((root) => lower.startsWith(root))) return true
     return lower.includes('\\steam\\appcache\\httpcache') || lower.includes('\\steam\\steamapps\\shadercache')
   })
+  const json = JSON.stringify(safePaths)
   return [
-    `$paths = ${JSON.stringify(safePaths)} | ConvertFrom-Json`,
+    `$pathsJson = @'\n${json}\n'@`,
+    '$paths = $pathsJson | ConvertFrom-Json',
     'foreach ($p in $paths) {',
     '  if (Test-Path -Path $p) {',
     '    Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue',
@@ -836,11 +844,19 @@ $bios = Get-CimInstance Win32_BIOS
 $board = Get-CimInstance Win32_BaseBoard
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $gpu = Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | Select-Object -First 1
-$displays = Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorListedSupportedSourceModes -ErrorAction SilentlyContinue |
-  Select-Object -First 8 | ForEach-Object {
-    $mode = $_.MonitorSourceModes | Sort-Object HorizontalActivePixels, VerticalActivePixels -Descending | Select-Object -First 1
-    [pscustomobject]@{ name = $_.InstanceName; width = $mode.HorizontalActivePixels; height = $mode.VerticalActivePixels; refreshRate = $mode.VerticalRefreshRate; primary = $false }
+$displays = @()
+try {
+  Add-Type -AssemblyName System.Windows.Forms
+  $displays = [System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+    [pscustomobject]@{ name = $_.DeviceName; width = $_.Bounds.Width; height = $_.Bounds.Height; refreshRate = 0; primary = $_.Primary }
   }
+} catch {
+  $displays = Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorListedSupportedSourceModes -ErrorAction SilentlyContinue |
+    Select-Object -First 8 | ForEach-Object {
+      $mode = $_.MonitorSourceModes | Sort-Object HorizontalActivePixels, VerticalActivePixels -Descending | Select-Object -First 1
+      [pscustomobject]@{ name = $_.InstanceName; width = $mode.HorizontalActivePixels; height = $mode.VerticalActivePixels; refreshRate = $mode.VerticalRefreshRate; primary = $false }
+    }
+}
 $powerPlan = (powercfg /getactivescheme) -join ' '
 $gameMode = Get-ItemPropertyValue -Path 'HKCU:\\Software\\Microsoft\\GameBar' -Name 'AutoGameModeEnabled' -ErrorAction SilentlyContinue
 $hags = Get-ItemPropertyValue -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' -Name 'HwSchMode' -ErrorAction SilentlyContinue
