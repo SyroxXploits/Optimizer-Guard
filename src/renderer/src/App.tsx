@@ -75,7 +75,7 @@ function App(): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>('tasks')
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null)
   const [busy, setBusy] = useState('')
-  const [notice, setNotice] = useState('Ready. Dry-run is on, so the first pass is safe.')
+  const [notice, setNotice] = useState('Preview mode is on, so the first pass is safe.')
   const [version, setVersion] = useState('')
   const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem('optimizer-theme') as ThemeId | null
@@ -351,7 +351,9 @@ function TaskDisabler({
                   {task.critical && <span className="pill danger">critical</span>}
                 </td>
                 <td className="mono">{task.path}</td>
-                <td>{task.status}</td>
+                <td>
+                  <TaskStatus task={task} />
+                </td>
                 <td>{task.nextRun}</td>
                 <td>{task.lastRun}</td>
                 <td>{task.author}</td>
@@ -906,6 +908,16 @@ function Spec({ label, value }: { label: string; value: string | number }): JSX.
   )
 }
 
+function TaskStatus({ task }: { task: ScheduledTaskRow }): JSX.Element {
+  const status = explainTaskStatus(task)
+  return (
+    <div className={`task-status ${status.tone}`}>
+      <strong>{status.label}</strong>
+      <span>{status.detail}</span>
+    </div>
+  )
+}
+
 function Select({ label, value, onChange, children }: { label: string; value: string; onChange: (value: string) => void; children: React.ReactNode }): JSX.Element {
   return (
     <label className="field">
@@ -924,6 +936,23 @@ function EmptyHint({ text, setNotice }: { text: string; setNotice: (notice: stri
       {text}
     </button>
   )
+}
+
+function explainTaskStatus(task: ScheduledTaskRow): { label: string; detail: string; tone: 'enabled' | 'disabled' | 'running' | 'warning' } {
+  const raw = task.status.trim().toLowerCase()
+  if (!task.enabled || raw.includes('disabled') || raw.includes('désactivé')) {
+    return { label: 'Disabled', detail: 'Will not run automatically', tone: 'disabled' }
+  }
+  if (raw.includes('running') || raw.includes('en cours')) {
+    return { label: 'Running now', detail: 'Currently active', tone: 'running' }
+  }
+  if (raw.includes('queued')) {
+    return { label: 'Queued', detail: 'Waiting to start', tone: 'warning' }
+  }
+  if (raw.includes('could not') || raw.includes('unknown')) {
+    return { label: 'Unknown', detail: task.status || 'Windows did not report state', tone: 'warning' }
+  }
+  return { label: 'Enabled', detail: 'Waiting for next trigger', tone: 'enabled' }
 }
 
 function LogEntry({ log }: { log: CommandLogEntry }): JSX.Element {
