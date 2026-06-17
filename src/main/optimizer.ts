@@ -111,7 +111,7 @@ export class OptimizerService {
     return parseCsv(result.stdout).map((row) => {
       const taskName = pick(row, 'TaskName', 'Task Name')
       const status = pick(row, 'Status')
-      const enabled = !['disabled', 'désactivé'].includes(status.trim().toLowerCase())
+      const enabled = !['disabled', 'desactive'].includes(normalizeStatus(status))
       const microsoft = taskName.toLowerCase().startsWith('\\microsoft\\')
       const critical = criticalTaskHints.some((hint) => taskName.toLowerCase().startsWith(hint.toLowerCase()))
       const split = taskName.lastIndexOf('\\')
@@ -798,6 +798,14 @@ function commandTarget(id: string, label: string, description: string, requiresA
 
 function expandEnv(input: string): string {
   return input.replace(/%([^%]+)%/g, (_, name) => process.env[name] ?? `%${name}%`)
+}
+
+function normalizeStatus(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
 }
 
 function safeDeleteScript(paths: string[]): string {

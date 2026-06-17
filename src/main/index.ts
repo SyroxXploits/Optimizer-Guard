@@ -35,7 +35,9 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
   mainWindow.webContents.once('did-finish-load', () => {
-    if (process.env.OPTIMIZER_GUARD_CAPTURE === '1') {
+    if (process.env.OPTIMIZER_GUARD_SMOKE === '1') {
+      void runSmokeTest(mainWindow)
+    } else if (process.env.OPTIMIZER_GUARD_CAPTURE === '1') {
       void captureScreenshots(mainWindow)
     }
   })
@@ -45,6 +47,62 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+}
+
+async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
+  if (!window) return
+  const outputDir = join(process.cwd(), 'debug')
+  mkdirSync(outputDir, { recursive: true })
+  window.setSize(1440, 960)
+  await wait(1000)
+
+  const results: {
+    startedAt: string
+    checks: Array<{ name: string; ok: boolean; value?: unknown; error?: string }>
+    completedAt?: string
+  } = {
+    startedAt: new Date().toISOString(),
+    checks: []
+  }
+
+  async function check(name: string, script: string): Promise<void> {
+    try {
+      const value = await window.webContents.executeJavaScript(script, true)
+      results.checks.push({ name, ok: true, value })
+    } catch (error) {
+      results.checks.push({ name, ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  await check('renderer booted', "Boolean(window.optimizerGuard && document.querySelector('.app-shell'))")
+  await check('nav tabs visible', "Array.from(document.querySelectorAll('nav button')).map((button) => button.textContent?.trim()).filter(Boolean)")
+  await check('app version', 'window.optimizerGuard.appVersion()')
+  await check('snapshot loads', "window.optimizerGuard.getSnapshot().then((snapshot) => ({ logs: snapshot.logs.length, restore: snapshot.restoreHistory.length }))")
+  await check('tasks query', "window.optimizerGuard.queryTasks().then((tasks) => ({ count: tasks.length, sample: tasks.slice(0, 3).map((task) => ({ name: task.name, status: task.status, enabled: task.enabled })) }))")
+  await check('features query', "window.optimizerGuard.queryFeatures().then((features) => features.map((feature) => ({ id: feature.id, state: feature.state })))")
+  await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, gpu: info.gpu.name, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
+  await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")
+  await check('nvidia detection', "window.optimizerGuard.getNvidiaState().then((state) => ({ gpu: state.profile.gpuName, detectedResolution: state.profile.detectedResolution, preferredResolution: state.profile.preferredResolution, dlssMode: state.profile.dlssMode }))")
+  await check('update checker', "window.optimizerGuard.checkForUpdates().then((update) => ({ currentVersion: update.currentVersion, latestVersion: update.latestVersion, error: update.error || '' }))")
+  await check('tab click through', `
+    (async () => {
+      const labels = ['Tasks', 'System', 'Cleaning', 'NVIDIA', 'Logs', 'About']
+      const visited = []
+      for (const label of labels) {
+        const button = Array.from(document.querySelectorAll('button')).find((item) => item.textContent?.includes(label))
+        if (!button) throw new Error('Missing tab ' + label)
+        button.click()
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        visited.push(document.querySelector('.hero h1')?.textContent || label)
+      }
+      return visited
+    })()
+  `)
+
+  results.completedAt = new Date().toISOString()
+  writeFileSync(join(outputDir, 'smoke-results.json'), JSON.stringify(results, null, 2))
+  const failed = results.checks.filter((item) => !item.ok)
+  app.exit(failed.length ? 1 : 0)
 }
 
 async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
@@ -179,7 +237,7 @@ function compareVersions(a: string, b: string): number {
 }
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.syrox.optimizer.guard')
+  electronApp.setAppUserModelId('com.optimizer.guard')
   app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
   registerIpc()
   createWindow()

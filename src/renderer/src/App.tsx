@@ -939,8 +939,8 @@ function EmptyHint({ text, setNotice }: { text: string; setNotice: (notice: stri
 }
 
 function explainTaskStatus(task: ScheduledTaskRow): { label: string; detail: string; tone: 'enabled' | 'disabled' | 'running' | 'warning' } {
-  const raw = task.status.trim().toLowerCase()
-  if (!task.enabled || raw.includes('disabled') || raw.includes('désactivé')) {
+  const raw = normalizeSchedulerText(task.status)
+  if (!task.enabled || raw.includes('disabled') || raw.includes('desactive')) {
     return { label: 'Disabled', detail: 'Will not run automatically', tone: 'disabled' }
   }
   if (raw.includes('running') || raw.includes('en cours')) {
@@ -953,6 +953,14 @@ function explainTaskStatus(task: ScheduledTaskRow): { label: string; detail: str
     return { label: 'Unknown', detail: task.status || 'Windows did not report state', tone: 'warning' }
   }
   return { label: 'Enabled', detail: 'Waiting for next trigger', tone: 'enabled' }
+}
+
+function normalizeSchedulerText(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
 }
 
 function LogEntry({ log }: { log: CommandLogEntry }): JSX.Element {
