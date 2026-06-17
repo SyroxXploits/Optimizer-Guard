@@ -253,7 +253,7 @@ function TaskDisabler({
     .slice(0, 500)
 
   async function toggleTask(task: ScheduledTaskRow, enable: boolean): Promise<void> {
-    if (task.critical && !window.confirm('This looks like a Microsoft/security/system task. Continue anyway?')) return
+    if (task.critical && !window.confirm(`"${task.name}" looks like a Microsoft/security/system task.\n\nChanging it can reduce Windows protection or maintenance. Continue anyway?`)) return
     await runBusy(`${enable ? 'Enabling' : 'Disabling'} ${task.path}`, async () => {
       const result = await window.optimizerGuard.setTaskState(task.path, enable)
       await refresh()
@@ -310,8 +310,14 @@ function TaskDisabler({
             </div>
             <div className="feature-actions">
               <strong>{feature.state}</strong>
-              <button onClick={() => void toggleFeature(feature, false)}>Disable</button>
-              <button onClick={() => void toggleFeature(feature, true)}>Enable</button>
+              {feature.state.toLowerCase() === 'enabled' && <button onClick={() => void toggleFeature(feature, false)}>Disable</button>}
+              {feature.state.toLowerCase() === 'disabled' && <button onClick={() => void toggleFeature(feature, true)}>Enable</button>}
+              {!['enabled', 'disabled'].includes(feature.state.toLowerCase()) && (
+                <>
+                  <button onClick={() => void toggleFeature(feature, false)}>Disable</button>
+                  <button onClick={() => void toggleFeature(feature, true)}>Enable</button>
+                </>
+              )}
             </div>
           </div>
         ))}
@@ -349,8 +355,8 @@ function TaskDisabler({
                 <td>{task.lastRun}</td>
                 <td>{task.author}</td>
                 <td>
-                  <button className={task.enabled ? 'danger-button' : 'secondary'} onClick={() => void toggleTask(task, !task.enabled)}>
-                    {task.enabled ? 'Disable' : 'Enable'}
+                  <button className={task.critical && task.enabled ? 'warn-button' : task.enabled ? 'danger-button' : 'secondary'} onClick={() => void toggleTask(task, !task.enabled)}>
+                    {task.critical && task.enabled ? 'Review' : task.enabled ? 'Disable' : 'Enable'}
                   </button>
                 </td>
               </tr>
@@ -487,7 +493,17 @@ function CleaningPanel({
       setNotice('Select at least one cleanup target first.')
       return
     }
-    if (chosen.some((target) => target.dangerous) && !window.confirm('One or more selected targets are marked dangerous. Continue?')) return
+    const risky = chosen.some((target) => target.dangerous)
+    const message = [
+      `Clean ${chosen.length} selected target${chosen.length === 1 ? '' : 's'}?`,
+      '',
+      `Estimated removable data: ${formatBytes(selectedBytes)}`,
+      'Personal folders and game saves are excluded.',
+      risky ? 'One or more selected targets are marked dangerous.' : ''
+    ]
+      .filter(Boolean)
+      .join('\n')
+    if (!window.confirm(message)) return
     const result = await runBusy('Cleaning selected targets...', () => window.optimizerGuard.cleanSelected([...selected]), 'Cleanup finished and logged.')
     if (result) setNotice(`Cleaned ${formatBytes(result.beforeBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
     await scan()
@@ -580,6 +596,17 @@ function NvidiaPanel({
 
   async function apply(): Promise<void> {
     if (!profile) return
+    const selectedActionLabels = state?.actions
+      .filter((action) => {
+        const key = action.id === 'patch-nvidia-resolution' ? 'patchNvidiaAppResolution' : action.id === 'disable-overlay' ? 'disableOverlay' : action.id === 'game-mode' ? 'setGameMode' : 'disableGameDvr'
+        return actions[key]
+      })
+      .map((action) => `- ${action.label}`) ?? []
+    if (selectedActionLabels.length === 0) {
+      setNotice('Select at least one optimizer action first.')
+      return
+    }
+    if (!window.confirm(`Apply ${selectedActionLabels.length} optimizer action${selectedActionLabels.length === 1 ? '' : 's'}?\n\n${selectedActionLabels.join('\n')}`)) return
     const request: ApplyNvidiaProfileRequest = { profile, ...actions }
     const result = await runBusy('Applying selected NVIDIA and Windows gaming optimizations...', () => window.optimizerGuard.applyNvidiaProfile(request), 'NVIDIA optimizer actions finished.')
     if (result) setNotice(`Applied ${result.length} optimizer actions. DLSS profile saved inside the app.`)
