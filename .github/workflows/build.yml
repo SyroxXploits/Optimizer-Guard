@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -33,30 +37,34 @@ jobs:
         run: npm run build
 
       - name: Package Windows release
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: npm run package:win -- --publish never
 
-      # electron-builder will not overwrite a release asset that already exists
-      # with the same name, so re-publishing the same version (e.g. a rebuilt
-      # v1.0.15) would silently keep the old binaries. Delete any existing assets
-      # for this tag first so the fresh build is what actually gets published.
-      - name: Remove stale release assets
+      - name: Publish GitHub release assets
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        shell: bash
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
-            -q '.assets[].name' 2>/dev/null | while read -r asset; do
-            [ -n "$asset" ] && gh release delete-asset "$GITHUB_REF_NAME" "$asset" \
-              --repo "$GITHUB_REPOSITORY" --yes
-          done || true
+          $version = (node -p "require('./package.json').version").Trim()
+          $setupSource = "dist\Optimizer Guard Setup $version.exe"
+          $setupBlockmapSource = "dist\Optimizer Guard Setup $version.exe.blockmap"
+          $portableSource = "dist\Optimizer Guard $version.exe"
+          $setupAsset = "dist\Optimizer-Guard-Setup-$version.exe"
+          $setupBlockmapAsset = "dist\Optimizer-Guard-Setup-$version.exe.blockmap"
+          $portableAsset = "dist\Optimizer-Guard-Portable-$version.exe"
 
-      - name: Package Windows release and publish
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run package:win -- --publish always
+          Copy-Item -LiteralPath $setupSource -Destination $setupAsset -Force
+          Copy-Item -LiteralPath $setupBlockmapSource -Destination $setupBlockmapAsset -Force
+          Copy-Item -LiteralPath $portableSource -Destination $portableAsset -Force
+
+          gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Optimizer Guard $env:GITHUB_REF_NAME" --notes "Windows release build for Optimizer Guard $env:GITHUB_REF_NAME."
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          gh release upload $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY $setupAsset $portableAsset $setupBlockmapAsset --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
