@@ -116,12 +116,12 @@ const demoLeftovers: LeftoverCandidate[] = [
 ]
 
 const demoApi = {
-  appVersion: async () => '1.1.1',
+  appVersion: async () => '1.1.2',
   checkForUpdates: async () => ({
-    currentVersion: '1.1.1',
-    latestVersion: '1.1.1',
-    releaseName: 'Optimizer Guard v1.1.1',
-    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.1',
+    currentVersion: '1.1.2',
+    latestVersion: '1.1.2',
+    releaseName: 'Optimizer Guard v1.1.2',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.2',
     isUpdateAvailable: false
   }),
   minimize: async () => undefined,

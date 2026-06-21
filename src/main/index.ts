@@ -110,7 +110,35 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
   `)
   await check('features query', "window.optimizerGuard.queryFeatures().then((features) => features.map((feature) => ({ id: feature.id, state: feature.state })))")
   await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, cpuClock: info.cpu.currentClockMhz, gpu: info.gpu.name, gpuClock: info.gpu.graphicsClockMhz, memoryGb: info.memoryGb, resizableBar: info.gpu.resizableBar, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
-  await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")
+  await check('cleaning scan', `
+    (async () => {
+      const started = performance.now()
+      const targets = await window.optimizerGuard.scanCleaning()
+      const durationMs = Math.round(performance.now() - started)
+      if (durationMs > 5000) throw new Error('Cleaning scan exceeded 5 seconds: ' + durationMs + 'ms')
+      return {
+        count: targets.length,
+        detected: targets.filter((target) => target.detected).length,
+        estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0),
+        durationMs
+      }
+    })()
+  `)
+  try {
+    const cleaningBatch = await service.smokeTestCleaningBatch()
+    results.checks.push({
+      name: 'fast cleaning batch',
+      ok: cleaningBatch.success && cleaningBatch.durationMs < 5000,
+      value: cleaningBatch,
+      error: cleaningBatch.success ? undefined : cleaningBatch.error || `${cleaningBatch.remaining} test items remained`
+    })
+  } catch (error) {
+    results.checks.push({
+      name: 'fast cleaning batch',
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  }
   await check('installed apps query', "window.optimizerGuard.queryInstalledApps().then((apps) => ({ count: apps.length, sample: apps.slice(0, 5).map((app) => ({ name: app.name, publisher: app.publisher, version: app.version })) }))")
   await check('uninstall leftover scan', "window.optimizerGuard.queryInstalledApps().then((apps) => apps[0] ? window.optimizerGuard.scanUninstallLeftovers(apps[0].id).then((items) => ({ app: apps[0].name, count: items.length, kinds: [...new Set(items.map((item) => item.kind))] })) : ({ app: '', count: 0, kinds: [] }))")
   await check('uninstall candidates avoid shared vendor roots', `

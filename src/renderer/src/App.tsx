@@ -536,7 +536,7 @@ function CleaningPanel({
       setTargets(result)
       setSelected(new Set(result.filter((target) => target.selectedByDefault && target.detected).map((target) => target.id)))
       setResultState('finished')
-      setResultText(`Scan finished. ${result.filter((target) => target.detected).length} cleanup categories contain removable data.`)
+      setResultText(`Quick scan finished. ${result.filter((target) => target.detected).length} cleanup categories contain removable data. Large folders use approximate sizes.`)
     } else {
       setResultState('failed')
       setResultText('Scan stopped. Open Logs for the command error.')

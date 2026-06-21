@@ -72,6 +72,7 @@ export class OptimizerService {
   private settings: AppSettings = defaultSettings
   private installedApps = new Map<string, InstalledApp>()
   private uninstallLeftovers = new Map<string, LeftoverCandidate>()
+  private cleanTargetCache = new Map<string, CleanTarget>()
 
   constructor() {
     this.dataDir = join(app.getPath('userData'), 'optimizer-guard')
@@ -422,6 +423,7 @@ export class OptimizerService {
     progress?.({ operation: 'clean-scan', current: 0, total: 1, label: 'Checking safe cleanup locations...', state: 'running' })
     try {
       const result = await this.buildCleanTargets(this.getCleanDefinitions())
+      this.cleanTargetCache = new Map(result.map((target) => [target.id, target]))
       progress?.({ operation: 'clean-scan', current: 1, total: 1, label: 'Scan finished', state: 'finished' })
       return result
     } catch (error) {
@@ -446,30 +448,58 @@ export class OptimizerService {
 
   async cleanTargets(ids: string[], dryRun: boolean, progress?: (progress: OperationProgress) => void): Promise<CleanResult> {
     const definitions = this.getCleanDefinitions().filter((target) => ids.includes(target.id))
-    const total = Math.max(1, definitions.length + 2)
+    const fileTargets = definitions.filter((target) => !target.commandOnly)
+    const commandTargets = definitions.filter((target) => target.commandOnly)
+    const normalTargets = fileTargets.filter((target) => !target.requiresAdmin)
+    const adminTargets = fileTargets.filter((target) => target.requiresAdmin)
+    const batchCount = Number(normalTargets.length > 0) + Number(adminTargets.length > 0)
+    const total = Math.max(1, batchCount + commandTargets.length + 1)
     try {
-      progress?.({ operation: 'clean-run', current: 0, total, label: 'Measuring selected targets...', state: 'running' })
-      const targets = await this.buildCleanTargets(definitions)
+      progress?.({ operation: 'clean-run', current: 0, total, label: 'Preparing selected targets...', state: 'running' })
+      const missingDefinitions = definitions.filter((target) => !this.cleanTargetCache.has(target.id))
+      const missingTargets = missingDefinitions.length ? await this.buildCleanTargets(missingDefinitions) : []
+      const missingById = new Map(missingTargets.map((target) => [target.id, target]))
+      const targets = definitions.map((target) => this.cleanTargetCache.get(target.id) ?? missingById.get(target.id) ?? target)
       const beforeBytes = targets.reduce((sum, target) => sum + target.estimatedBytes, 0)
       const logs: CommandLogEntry[] = []
+      let step = 0
 
-      for (let index = 0; index < targets.length; index += 1) {
-        const target = targets[index]
-        progress?.({ operation: 'clean-run', current: index + 1, total, label: `Cleaning ${target.label}...`, state: 'running' })
-        if (target.commandOnly) {
-          logs.push(await this.runCleaningCommand(target, dryRun))
-        } else {
-          const expandedPaths = target.paths.map(expandEnv)
-          const script = safeDeleteScript(expandedPaths)
-          const run = target.requiresAdmin
-            ? await this.runElevatedPowerShell(script, `Clean ${target.label}`, dryRun, 'clean', 180_000)
-            : await this.runPowerShell(script, { kind: 'clean', label: `Clean ${target.label}`, dryRun, timeoutMs: 120_000 })
-          logs.push(run)
-        }
+      if (normalTargets.length > 0) {
+        step += 1
+        progress?.({ operation: 'clean-run', current: step, total, label: `Cleaning ${normalTargets.length} user cache categories...`, state: 'running' })
+        logs.push(
+          await this.runPowerShell(safeDeleteScript(normalTargets.flatMap((target) => target.paths.map(expandEnv))), {
+            kind: 'clean',
+            label: `Clean ${normalTargets.length} user cache categories`,
+            dryRun,
+            timeoutMs: 90_000
+          })
+        )
       }
 
-      progress?.({ operation: 'clean-run', current: total - 1, total, label: 'Measuring freed space...', state: 'running' })
+      if (adminTargets.length > 0) {
+        step += 1
+        progress?.({ operation: 'clean-run', current: step, total, label: `Cleaning ${adminTargets.length} system cache categories...`, state: 'running' })
+        logs.push(
+          await this.runElevatedPowerShell(
+            safeDeleteScript(adminTargets.flatMap((target) => target.paths.map(expandEnv))),
+            `Clean ${adminTargets.length} system cache categories`,
+            dryRun,
+            'clean',
+            120_000
+          )
+        )
+      }
+
+      for (const target of commandTargets) {
+        step += 1
+        progress?.({ operation: 'clean-run', current: step, total, label: `Running ${target.label}...`, state: 'running' })
+        logs.push(await this.runCleaningCommand(target, dryRun))
+      }
+
+      progress?.({ operation: 'clean-run', current: total - 1, total, label: 'Quickly checking what remains...', state: 'running' })
       const afterTargets = await this.buildCleanTargets(definitions)
+      for (const target of afterTargets) this.cleanTargetCache.set(target.id, target)
       const afterBytes = afterTargets.reduce((sum, target) => sum + target.estimatedBytes, 0)
       const failed = logs.filter((log) => !log.success)
       progress?.({
@@ -483,6 +513,27 @@ export class OptimizerService {
     } catch (error) {
       progress?.({ operation: 'clean-run', current: total, total, label: 'Cleanup stopped with an error', state: 'failed' })
       throw error
+    }
+  }
+
+  async smokeTestCleaningBatch(): Promise<{ success: boolean; durationMs: number; remaining: number; error: string }> {
+    const root = join(process.env.TEMP ?? os.tmpdir(), `optimizer-guard-clean-smoke-${Date.now()}`)
+    const nested = join(root, 'nested')
+    mkdirSync(nested, { recursive: true })
+    writeFileSync(join(root, 'cache.tmp'), 'cache', 'utf8')
+    writeFileSync(join(nested, 'shader.bin'), Buffer.alloc(64 * 1024), 'binary')
+    const started = Date.now()
+    const log = await this.runPowerShell(safeDeleteScript([join(root, '*')]), {
+      kind: 'clean',
+      label: 'Smoke test fast cleaning batch',
+      timeoutMs: 15_000
+    })
+    const remaining = existsSync(root) ? readdirSync(root).length : 0
+    return {
+      success: log.success && remaining === 0,
+      durationMs: Date.now() - started,
+      remaining,
+      error: log.stderr
     }
   }
 
@@ -898,11 +949,11 @@ $found = foreach ($item in $items) {
     groups: Array<{ id: string; paths: string[] }>
   ): Record<string, { bytes: number; partial: boolean; files: number; exists: boolean }> {
     const started = Date.now()
-    const globalDeadline = started + 8_000
+    const globalDeadline = started + 2_000
     const estimates: Record<string, { bytes: number; partial: boolean; files: number; exists: boolean }> = {}
     for (const group of groups) {
-      const deadline = Math.min(globalDeadline, Date.now() + 350)
-      estimates[group.id] = estimatePathPatterns(group.paths, deadline, 5000)
+      const deadline = Math.min(globalDeadline, Date.now() + 90)
+      estimates[group.id] = estimatePathPatterns(group.paths, deadline, 1200)
     }
     this.addLog({
       kind: 'clean',
@@ -1768,35 +1819,27 @@ function safeDeleteScript(paths: string[]): string {
   return [
     `$pathsJson = @'\n${json}\n'@`,
     '$paths = $pathsJson | ConvertFrom-Json',
-    '[int64]$bytes = 0',
     '[int]$deleted = 0',
     '[int]$failed = 0',
-    '[bool]$capped = $false',
-    '$timer = [System.Diagnostics.Stopwatch]::StartNew()',
-    '$maxFiles = 50000',
-    '$maxMs = 90000',
+    '$errors = [System.Collections.Generic.List[string]]::new()',
     'foreach ($p in $paths) {',
     '  try {',
-    '    foreach ($item in Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) {',
-    '      if ($timer.ElapsedMilliseconds -gt $maxMs -or $deleted -ge $maxFiles) { $capped = $true; break }',
+    '    $items = @(Get-Item -Path $p -Force -ErrorAction SilentlyContinue)',
+    '    foreach ($item in $items) {',
     '      try {',
-    '        $size = [int64]$item.Length',
-    '        Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop',
-    '        $bytes += $size',
+    '        Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop',
     '        $deleted++',
     '      } catch {',
     '        $failed++',
+    '        if ($errors.Count -lt 20) { $errors.Add(($_.Exception.Message + " :: " + $item.FullName)) }',
     '      }',
     '    }',
-    '  } catch {}',
-    '  if ($capped) { break }',
-    '  try {',
-    '    Get-ChildItem -Path $p -Force -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object {',
-    '      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {}',
-    '    }',
-    '  } catch {}',
+    '  } catch {',
+    '    $failed++',
+    '    if ($errors.Count -lt 20) { $errors.Add(($_.Exception.Message + " :: " + $p)) }',
+    '  }',
     '}',
-    '[pscustomobject]@{ paths = @($paths).Count; deletedFiles = $deleted; failedFiles = $failed; deletedBytes = $bytes; capped = $capped } | ConvertTo-Json -Compress'
+    '[pscustomobject]@{ paths = @($paths).Count; removedItems = $deleted; failedItems = $failed; errors = @($errors) } | ConvertTo-Json -Compress'
   ].join('\n')
 }
 
