@@ -7,6 +7,8 @@ import type {
   AppSettings,
   AppSnapshot,
   ApplyNvidiaProfileRequest,
+  BatchUninstallRequest,
+  BatchUninstallResult,
   CleanResult,
   CleanTarget,
   CommandLogEntry,
@@ -537,6 +539,19 @@ export class OptimizerService {
     }
   }
 
+  async smokeTestUninstallPlanning(): Promise<{ checked: number; invalid: string[]; drives: string[] }> {
+    const apps = await this.queryInstalledApps()
+    const silentApps = apps.filter((app) => app.supportsSilent).slice(0, 25)
+    const invalid = silentApps
+      .filter((app) => !getUninstallInvocation(app, true))
+      .map((app) => app.name)
+    return {
+      checked: silentApps.length,
+      invalid,
+      drives: [...new Set(apps.map((app) => app.installDrive))].sort()
+    }
+  }
+
   async queryInstalledApps(): Promise<InstalledApp[]> {
     const result = await this.runPowerShell(installedAppsScript(), {
       kind: 'uninstall',
@@ -547,11 +562,10 @@ export class OptimizerService {
     try {
       const parsed = JSON.parse(result.stdout.trim())
       const rows = (Array.isArray(parsed) ? parsed : [parsed]) as Array<Record<string, unknown>>
-      this.installedApps.clear()
-      return rows
+      const apps = rows
         .map((row) => {
           const app: InstalledApp = {
-            id: cryptoId(),
+            id: installedAppId(String(row.registryPath ?? ''), String(row.name ?? '')),
             name: String(row.name ?? '').trim(),
             publisher: String(row.publisher ?? '').trim(),
             version: String(row.version ?? '').trim(),
@@ -561,13 +575,16 @@ export class OptimizerService {
             quietUninstallString: String(row.quietUninstallString ?? '').trim(),
             estimatedSizeBytes: Math.max(0, Number(row.estimatedSizeKb ?? 0) * 1024),
             registryPath: String(row.registryPath ?? '').replace(/^Microsoft\.PowerShell\.Core\\Registry::/i, ''),
-            systemComponent: Number(row.systemComponent ?? 0) === 1
+            systemComponent: Number(row.systemComponent ?? 0) === 1,
+            installDrive: detectInstallDrive(String(row.installLocation ?? ''), String(row.uninstallString ?? '')),
+            supportsSilent: Boolean(String(row.quietUninstallString ?? '').trim()) || isMsiUninstallString(String(row.uninstallString ?? ''))
           }
-          this.installedApps.set(app.id, app)
           return app
         })
         .filter((item) => item.name && item.uninstallString && !item.systemComponent)
         .sort((a, b) => a.name.localeCompare(b.name))
+      this.installedApps = new Map(apps.map((installedApp) => [installedApp.id, installedApp]))
+      return apps
     } catch {
       return []
     }
@@ -598,6 +615,146 @@ export class OptimizerService {
     return { app: installedApp, log }
   }
 
+  async batchUninstall(
+    request: BatchUninstallRequest,
+    progress?: (progress: OperationProgress) => void
+  ): Promise<BatchUninstallResult> {
+    const apps = request.appIds.map((id) => this.installedApps.get(id)).filter((item): item is InstalledApp => Boolean(item))
+    const items: BatchUninstallResult['items'] = []
+    const logs: CommandLogEntry[] = []
+    let leftoversRemoved = 0
+    let leftoverFailures = 0
+    const total = Math.max(1, apps.length)
+
+    if (request.silent) {
+      const supported = apps.filter((app) => app.supportsSilent)
+      for (const app of apps.filter((item) => !item.supportsSilent)) {
+        items.push({ app, status: 'skipped', message: 'No registered silent uninstall command.' })
+      }
+      if (supported.length > 0) {
+        progress?.({ operation: 'uninstall-remove', current: 0, total, label: `Silently uninstalling ${supported.length} applications...`, state: 'running' })
+        const invocations = supported.map((app) => {
+          const invocation = getUninstallInvocation(app, true)
+          return { id: app.id, name: app.name, executable: invocation?.executable ?? '', args: invocation?.args ?? [] }
+        })
+        const log = await this.runElevatedPowerShell(
+          silentBatchUninstallScript(JSON.stringify(invocations)),
+          `Silent uninstall ${supported.length} applications`,
+          false,
+          'uninstall',
+          Math.max(15 * 60_000, supported.length * 5 * 60_000)
+        )
+        logs.push(log)
+        let statuses = new Map<string, { exitCode: number; error: string }>()
+        try {
+          const parsed = JSON.parse(log.stdout.trim())
+          statuses = new Map((Array.isArray(parsed) ? parsed : [parsed]).map((item) => [String(item.id), {
+            exitCode: Number(item.exitCode ?? 1),
+            error: String(item.error ?? '')
+          }]))
+        } catch {}
+        const completedAppIds: string[] = []
+        for (const app of supported) {
+          const status = statuses.get(app.id)
+          const success = log.success && Boolean(status && [0, 1641, 3010].includes(status.exitCode))
+          items.push({
+            app,
+            status: success ? 'completed' : 'failed',
+            message: success
+              ? status?.exitCode === 3010 || status?.exitCode === 1641 ? 'Silent uninstall completed; restart requested.' : 'Silent uninstall completed.'
+              : status?.error || log.stderr || `Silent uninstall failed with exit code ${status?.exitCode ?? 'unknown'}.`,
+            log
+          })
+          if (success) completedAppIds.push(app.id)
+        }
+        if (request.autoDeleteLeftovers && completedAppIds.length > 0) {
+          progress?.({ operation: 'uninstall-remove', current: supported.length, total, label: 'Scanning and quarantining safe leftovers...', state: 'running' })
+          const candidates = await this.scanUninstallLeftoversMany(completedAppIds)
+          const automatic = candidates.filter((item) => item.selectedByDefault && !item.protected)
+          if (automatic.length > 0) {
+            const removal = await this.removeUninstallLeftovers(automatic.map((item) => item.id))
+            leftoversRemoved = removal.removed
+            leftoverFailures = removal.failed
+            logs.push(...removal.logs)
+          }
+        }
+      }
+      progress?.({
+        operation: 'uninstall-remove',
+        current: total,
+        total,
+        label: `Silent batch finished: ${items.filter((item) => item.status === 'completed').length} completed`,
+        state: items.some((item) => item.status === 'failed') ? 'failed' : 'finished'
+      })
+      return { items, leftoversRemoved, leftoverFailures, logs }
+    }
+
+    for (let index = 0; index < apps.length; index += 1) {
+      const installedApp = apps[index]
+      progress?.({
+        operation: 'uninstall-remove',
+        current: index,
+        total,
+        label: `${request.silent ? 'Silently uninstalling' : 'Launching'} ${installedApp.name}...`,
+        state: 'running'
+      })
+      const log = await this.runInstalledAppUninstaller(installedApp, false)
+      logs.push(log)
+      const status = log.success ? 'launched' : 'failed'
+      items.push({
+        app: installedApp,
+        status,
+        message: log.success
+          ? 'Uninstaller launched.'
+          : log.stderr || log.stdout || 'Uninstall command failed.',
+        log
+      })
+
+    }
+
+    progress?.({
+      operation: 'uninstall-remove',
+      current: total,
+      total,
+      label: `Batch finished: ${items.filter((item) => item.status === 'completed' || item.status === 'launched').length} processed`,
+      state: items.some((item) => item.status === 'failed') ? 'failed' : 'finished'
+    })
+    return { items, leftoversRemoved, leftoverFailures, logs }
+  }
+
+  private async runInstalledAppUninstaller(installedApp: InstalledApp, silent: boolean): Promise<CommandLogEntry> {
+    const invocation = getUninstallInvocation(installedApp, silent)
+    if (!invocation) {
+      return this.addLog({
+        kind: 'uninstall',
+        label: `${silent ? 'Silent uninstall' : 'Uninstall'} ${installedApp.name}`,
+        command: 'internal',
+        args: [],
+        stdout: '',
+        stderr: 'Windows did not provide a usable uninstall command.',
+        exitCode: 1,
+        success: false,
+        dryRun: false,
+        elevated: false
+      })
+    }
+    const { executable, args } = invocation
+    const argumentLine = args.map(quoteWindowsArgument).join(' ')
+    const script = [
+      `$file = '${escapePowerShellSingle(executable)}'`,
+      `$argumentLine = '${escapePowerShellSingle(argumentLine)}'`,
+      silent
+        ? "$process = Start-Process -FilePath $file -ArgumentList $argumentLine -Verb RunAs -Wait -PassThru; exit $process.ExitCode"
+        : "Start-Process -FilePath $file -ArgumentList $argumentLine -Verb RunAs",
+      silent ? '' : `'Launched registered uninstaller for ${escapePowerShellSingle(installedApp.name)}.'`
+    ].filter(Boolean).join('\n')
+    return this.runPowerShell(script, {
+      kind: 'uninstall',
+      label: `${silent ? 'Silent uninstall' : 'Launch uninstaller for'} ${installedApp.name}`,
+      timeoutMs: silent ? 15 * 60_000 : 30_000
+    })
+  }
+
   async scanUninstallLeftovers(appId: string, progress?: (progress: OperationProgress) => void): Promise<LeftoverCandidate[]> {
     const installedApp = this.installedApps.get(appId)
     if (!installedApp) throw new Error('Refresh the installed app list before scanning leftovers.')
@@ -608,7 +765,9 @@ export class OptimizerService {
     const estimateJson = JSON.stringify(fileDefinitions.map((item) => ({ id: item.id, paths: [item.path] })))
     const estimates = fileDefinitions.length > 0 ? await this.estimateArbitraryTargets(estimateJson) : {}
     const existingRegistryIds = await this.findExistingRegistryCandidates(registryDefinitions)
-    this.uninstallLeftovers.clear()
+    for (const [id, candidate] of this.uninstallLeftovers) {
+      if (candidate.appId === installedApp.id) this.uninstallLeftovers.delete(id)
+    }
     const candidates = definitions
       .filter((item) => item.kind === 'registry' ? existingRegistryIds.has(item.id) : Boolean(estimates[item.id]?.exists))
       .map((item) => ({
@@ -618,6 +777,32 @@ export class OptimizerService {
     for (const candidate of candidates) this.uninstallLeftovers.set(candidate.id, candidate)
     progress?.({ operation: 'uninstall-scan', current: 1, total: 1, label: `Found ${candidates.length} reviewable leftovers`, state: 'finished' })
     return candidates
+  }
+
+  async scanUninstallLeftoversMany(
+    appIds: string[],
+    progress?: (progress: OperationProgress) => void
+  ): Promise<LeftoverCandidate[]> {
+    const all: LeftoverCandidate[] = []
+    for (let index = 0; index < appIds.length; index += 1) {
+      const app = this.installedApps.get(appIds[index])
+      progress?.({
+        operation: 'uninstall-scan',
+        current: index,
+        total: Math.max(1, appIds.length),
+        label: `Scanning ${app?.name ?? 'selected application'}...`,
+        state: 'running'
+      })
+      all.push(...await this.scanUninstallLeftovers(appIds[index]))
+    }
+    progress?.({
+      operation: 'uninstall-scan',
+      current: appIds.length,
+      total: Math.max(1, appIds.length),
+      label: `Found ${all.length} leftovers across selected applications`,
+      state: 'finished'
+    })
+    return all
   }
 
   private async findExistingRegistryCandidates(candidates: LeftoverCandidate[]): Promise<Set<string>> {
@@ -1459,6 +1644,74 @@ function parseUninstallCommand(commandLine: string): { executable: string; args:
   let token: RegExpExecArray | null
   while ((token = tokenPattern.exec(remainder))) args.push(token[1] ?? token[2])
   return { executable, args }
+}
+
+function installedAppId(registryPath: string, name: string): string {
+  return `app-${Buffer.from(`${registryPath}|${name}`.toLowerCase(), 'utf8').toString('base64url').slice(0, 72)}`
+}
+
+function detectInstallDrive(installLocation: string, uninstallString: string): string {
+  const locationMatch = expandEnv(installLocation).match(/^([a-z]):\\/i)
+  if (locationMatch) return `${locationMatch[1].toUpperCase()}:`
+  const command = parseUninstallCommand(uninstallString)
+  const executableMatch = command?.executable.match(/^([a-z]):\\/i)
+  return executableMatch ? `${executableMatch[1].toUpperCase()}:` : 'Unknown'
+}
+
+function isMsiUninstallString(value: string): boolean {
+  return /(?:^|[\\/])msiexec(?:\.exe)?\b/i.test(value) && /\{[0-9a-f-]{20,}\}/i.test(value)
+}
+
+function buildSilentMsiCommand(value: string): string {
+  if (!isMsiUninstallString(value)) return ''
+  const parsed = parseUninstallCommand(value)
+  if (!parsed) return ''
+  return [parsed.executable, ...normalizeMsiSilentArgs(parsed.args)].map(quoteWindowsArgument).join(' ')
+}
+
+function normalizeMsiSilentArgs(args: string[]): string[] {
+  const normalized = args.map((arg) => (/^\/i(?=\{)/i.test(arg) ? arg.replace(/^\/i/i, '/x') : arg))
+  if (!normalized.some((arg) => /^\/q/i.test(arg))) normalized.push('/qn')
+  if (!normalized.some((arg) => /^\/norestart$/i.test(arg))) normalized.push('/norestart')
+  return normalized
+}
+
+function getUninstallInvocation(installedApp: InstalledApp, silent: boolean): { executable: string; args: string[] } | null {
+  const commandLine = silent
+    ? installedApp.quietUninstallString || buildSilentMsiCommand(installedApp.uninstallString)
+    : installedApp.uninstallString
+  const command = parseUninstallCommand(commandLine)
+  if (!command) return null
+  const expandedExecutable = expandEnv(command.executable)
+  const executable = expandedExecutable.toLowerCase().endsWith('msiexec.exe') ? 'msiexec.exe' : expandedExecutable
+  const args = silent && executable.toLowerCase().endsWith('msiexec.exe')
+    ? normalizeMsiSilentArgs(command.args)
+    : command.args
+  return { executable, args }
+}
+
+function silentBatchUninstallScript(payload: string): string {
+  return `
+$itemsJson = @'
+${payload}
+'@
+$items = $itemsJson | ConvertFrom-Json
+$results = foreach ($item in $items) {
+  $errorText = ''
+  $exitCode = 1
+  try {
+    $argumentLine = @($item.args | ForEach-Object {
+      if ($_ -match '[\\s"]') { '"' + ($_ -replace '"', '\\"') + '"' } else { [string]$_ }
+    }) -join ' '
+    $process = Start-Process -FilePath $item.executable -ArgumentList $argumentLine -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+    $exitCode = if ($null -ne $process.ExitCode) { [int]$process.ExitCode } else { 0 }
+  } catch {
+    $errorText = $_ | Out-String
+  }
+  [pscustomobject]@{ id = [string]$item.id; name = [string]$item.name; exitCode = $exitCode; error = $errorText.Trim() }
+}
+@($results) | ConvertTo-Json -Depth 4 -Compress
+`
 }
 
 function quoteWindowsArgument(value: string): string {

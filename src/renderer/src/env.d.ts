@@ -4,6 +4,8 @@ import type {
   AppSettings,
   AppSnapshot,
   ApplyNvidiaProfileRequest,
+  BatchUninstallRequest,
+  BatchUninstallResult,
   CleanResult,
   CleanTarget,
   CommandLogEntry,
@@ -43,7 +45,9 @@ interface OptimizerGuardApi {
   onOperationProgress: (callback: (progress: OperationProgress) => void) => () => void
   queryInstalledApps: () => Promise<InstalledApp[]>
   launchUninstaller: (appId: string) => Promise<UninstallLaunchResult>
+  batchUninstall: (request: BatchUninstallRequest) => Promise<BatchUninstallResult>
   scanUninstallLeftovers: (appId: string) => Promise<LeftoverCandidate[]>
+  scanUninstallLeftoversMany: (appIds: string[]) => Promise<LeftoverCandidate[]>
   removeUninstallLeftovers: (ids: string[]) => Promise<LeftoverRemovalResult>
   getNvidiaState: () => Promise<NvidiaState>
   applyNvidiaProfile: (request: ApplyNvidiaProfileRequest) => Promise<CommandLogEntry[]>

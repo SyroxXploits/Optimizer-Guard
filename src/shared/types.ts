@@ -139,11 +139,33 @@ export interface InstalledApp {
   estimatedSizeBytes: number
   registryPath: string
   systemComponent: boolean
+  installDrive: string
+  supportsSilent: boolean
 }
 
 export interface UninstallLaunchResult {
   app: InstalledApp
   log: CommandLogEntry
+}
+
+export interface BatchUninstallRequest {
+  appIds: string[]
+  silent: boolean
+  autoDeleteLeftovers: boolean
+}
+
+export interface BatchUninstallItemResult {
+  app: InstalledApp
+  status: 'launched' | 'completed' | 'skipped' | 'failed'
+  message: string
+  log?: CommandLogEntry
+}
+
+export interface BatchUninstallResult {
+  items: BatchUninstallItemResult[]
+  leftoversRemoved: number
+  leftoverFailures: number
+  logs: CommandLogEntry[]
 }
 
 export interface LeftoverCandidate {

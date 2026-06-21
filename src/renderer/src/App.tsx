@@ -93,6 +93,7 @@ function App(): JSX.Element {
   const [notice, setNotice] = useState('Ready. Actions apply only when you click them.')
   const [version, setVersion] = useState('')
   const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null)
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabId>>(new Set(['tasks']))
   const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem('optimizer-theme') as ThemeId | null
     return themes.some((item) => item.id === saved) ? saved! : 'mint'
@@ -116,7 +117,9 @@ function App(): JSX.Element {
       window.optimizerGuard.appVersion()
     ])
     setSettings(loadedSettings)
-    setActiveTab((loadedSettings.lastTab as TabId) || 'tasks')
+    const loadedTab = (loadedSettings.lastTab as TabId) || 'tasks'
+    setActiveTab(loadedTab)
+    setVisitedTabs((current) => new Set(current).add(loadedTab))
     setSnapshot(loadedSnapshot)
     setVersion(appVersion)
   }
@@ -132,6 +135,7 @@ function App(): JSX.Element {
 
   async function switchTab(id: TabId): Promise<void> {
     setActiveTab(id)
+    setVisitedTabs((current) => new Set(current).add(id))
     await saveSettings({ ...settings, lastTab: id })
   }
 
@@ -220,11 +224,15 @@ function App(): JSX.Element {
           <TaskDisabler settings={settings} runBusy={runBusy} setNotice={setNotice} snapshot={snapshot} />
         )}
         {activeTab === 'system' && <SystemPanel runBusy={runBusy} />}
-        {activeTab === 'cleaning' && (
-          <CleaningPanel settings={settings} runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+        {visitedTabs.has('cleaning') && (
+          <div className={activeTab === 'cleaning' ? 'persistent-tab active' : 'persistent-tab'}>
+            <CleaningPanel settings={settings} runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+          </div>
         )}
-        {activeTab === 'uninstaller' && (
-          <UninstallerPanel runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+        {visitedTabs.has('uninstaller') && (
+          <div className={activeTab === 'uninstaller' ? 'persistent-tab active' : 'persistent-tab'}>
+            <UninstallerPanel runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+          </div>
         )}
         {activeTab === 'nvidia' && (
           <NvidiaPanel settings={settings} saveSettings={saveSettings} runBusy={runBusy} setNotice={setNotice} />
@@ -654,14 +662,24 @@ function UninstallerPanel({
 }): JSX.Element {
   const [apps, setApps] = useState<InstalledApp[]>([])
   const [search, setSearch] = useState('')
-  const [selectedApp, setSelectedApp] = useState<InstalledApp | null>(null)
+  const [driveFilter, setDriveFilter] = useState('All')
+  const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set())
+  const [processedApps, setProcessedApps] = useState<Set<string>>(new Set())
   const [leftovers, setLeftovers] = useState<LeftoverCandidate[]>([])
   const [selectedLeftovers, setSelectedLeftovers] = useState<Set<string>>(new Set())
-  const [launchedAppId, setLaunchedAppId] = useState('')
+  const [silentMode, setSilentMode] = useState(false)
+  const [autoDeleteLeftovers, setAutoDeleteLeftovers] = useState(false)
+  const [statuses, setStatuses] = useState<Record<string, string>>({})
   const [resultState, setResultState] = useState<'idle' | 'running' | 'finished' | 'failed'>('idle')
   const [resultText, setResultText] = useState('')
   const uninstallProgress = progress?.operation.startsWith('uninstall-') ? progress : null
-  const visibleApps = apps.filter((app) => `${app.name} ${app.publisher}`.toLowerCase().includes(search.toLowerCase()))
+  const drives = ['All', ...Array.from(new Set(apps.map((app) => app.installDrive))).sort()]
+  const visibleApps = apps.filter((app) => {
+    const matchesSearch = `${app.name} ${app.publisher} ${app.installLocation}`.toLowerCase().includes(search.toLowerCase())
+    return matchesSearch && (driveFilter === 'All' || app.installDrive === driveFilter)
+  })
+  const selectedRows = apps.filter((app) => selectedApps.has(app.id))
+  const silentCapable = selectedRows.filter((app) => app.supportsSilent).length
   const selectedBytes = leftovers.reduce((sum, item) => (selectedLeftovers.has(item.id) ? sum + item.sizeBytes : sum), 0)
 
   useEffect(() => {
@@ -669,53 +687,98 @@ function UninstallerPanel({
   }, [])
 
   async function refreshApps(): Promise<void> {
-    const result = await runBusy('Reading installed applications from Windows...', () => window.optimizerGuard.queryInstalledApps())
+    const result = await runBusy('Reading installed applications from every registered drive...', () => window.optimizerGuard.queryInstalledApps())
     if (result) {
       setApps(result)
-      setSelectedApp((current) => result.find((app) => app.name === current?.name && app.publisher === current?.publisher) ?? result[0] ?? null)
-      setNotice(`Loaded ${result.length} uninstallable applications.`)
+      const validIds = new Set(result.map((app) => app.id))
+      setSelectedApps((current) => new Set([...current].filter((id) => validIds.has(id))))
+      setNotice(`Loaded ${result.length} applications across ${new Set(result.map((app) => app.installDrive)).size} drive groups.`)
     }
   }
 
-  async function launch(): Promise<void> {
-    if (!selectedApp) return
-    if (!window.confirm(`Run the registered uninstaller for ${selectedApp.name}?\n\nOptimizer Guard will not remove leftovers until you scan and approve them afterward.`)) return
-    setResultState('running')
-    setResultText('Launching the application vendor uninstaller...')
-    const result = await runBusy(`Launching ${selectedApp.name} uninstaller...`, async () => {
-      const launched = await window.optimizerGuard.launchUninstaller(selectedApp.id)
-      assertCommandSuccess(launched.log)
-      return launched
+  function toggleApp(appId: string, checked: boolean): void {
+    setSelectedApps((current) => {
+      const next = new Set(current)
+      if (checked) next.add(appId)
+      else next.delete(appId)
+      return next
     })
-    if (result) {
-      setResultState('finished')
-      setResultText('Uninstaller launched. Finish its wizard, then click Scan leftovers.')
-      setLaunchedAppId(selectedApp.id)
-      setNotice('Official uninstaller launched. Complete it before scanning leftovers.')
-    } else {
+  }
+
+  async function uninstallSelected(): Promise<void> {
+    if (selectedRows.length === 0) {
+      setNotice('Select one or more applications first.')
+      return
+    }
+    if (silentMode && silentCapable === 0) {
+      setNotice('None of the selected applications provides a verified silent uninstall command.')
+      return
+    }
+    const unsupported = silentMode ? selectedRows.length - silentCapable : 0
+    const confirmation = [
+      `${silentMode ? 'Silently uninstall' : 'Launch uninstallers for'} ${selectedRows.length} selected application${selectedRows.length === 1 ? '' : 's'}?`,
+      silentMode ? 'Silent mode uses one elevated batch and waits for each supported uninstaller.' : 'Interactive uninstallers may open multiple vendor windows.',
+      unsupported ? `${unsupported} application${unsupported === 1 ? '' : 's'} without silent support will be skipped.` : '',
+      autoDeleteLeftovers ? 'High-confidence leftovers will be quarantined automatically.' : 'Leftovers will stay available for manual review.'
+    ].filter(Boolean).join('\n\n')
+    if (!window.confirm(confirmation)) return
+    setResultState('running')
+    setResultText(`${silentMode ? 'Running silent uninstall batch' : 'Launching uninstallers'}...`)
+    const result = await runBusy('Processing uninstall queue...', () =>
+      window.optimizerGuard.batchUninstall({
+        appIds: selectedRows.map((app) => app.id),
+        silent: silentMode,
+        autoDeleteLeftovers: silentMode && autoDeleteLeftovers
+      })
+    )
+    if (!result) {
       setResultState('failed')
-      setResultText('The registered uninstaller could not be launched. Check Logs for details.')
+      setResultText('The uninstall queue stopped. Check Logs for details.')
+      return
+    }
+    setStatuses((current) => ({
+      ...current,
+      ...Object.fromEntries(result.items.map((item) => [item.app.id, `${item.status}: ${item.message}`]))
+    }))
+    const successfulIds = result.items
+      .filter((item) => item.status === 'completed' || item.status === 'launched')
+      .map((item) => item.app.id)
+    setProcessedApps((current) => new Set([...current, ...successfulIds]))
+    const failed = result.items.filter((item) => item.status === 'failed').length
+    const skipped = result.items.filter((item) => item.status === 'skipped').length
+    const message = `${successfulIds.length} processed, ${skipped} skipped, ${failed} failed.${result.leftoversRemoved ? ` ${result.leftoversRemoved} leftovers quarantined.` : ''}`
+    setResultState(failed ? 'failed' : 'finished')
+    setResultText(message)
+    setNotice(message)
+    if (silentMode && autoDeleteLeftovers) {
+      setSelectedApps(new Set())
+      await refreshApps()
     }
   }
 
   async function scanLeftovers(): Promise<void> {
-    if (!selectedApp) return
+    if (processedApps.size === 0) {
+      setNotice('Run the selected uninstallers first, then review their leftovers.')
+      return
+    }
+    const hasInteractive = [...processedApps].some((id) => statuses[id]?.startsWith('launched:'))
+    if (hasInteractive && !window.confirm('Confirm that every vendor uninstall wizard has finished before scanning leftovers.\n\nScanning too early can treat files from an app that is still installed as leftovers.')) return
     setResultState('running')
-    setResultText(`Scanning high-confidence leftovers for ${selectedApp.name}...`)
-    const result = await runBusy('Scanning uninstall leftovers...', () => window.optimizerGuard.scanUninstallLeftovers(selectedApp.id))
-    if (result) {
-      setLeftovers(result)
-      setSelectedLeftovers(new Set(result.filter((item) => item.selectedByDefault && !item.protected).map((item) => item.id)))
-      setResultState('finished')
-      const message = result.length
-        ? `Scan finished. Review ${result.length} leftover item${result.length === 1 ? '' : 's'} before removal.`
-        : 'Scan finished. No high-confidence leftovers were found.'
-      setResultText(message)
-      setNotice(message)
-    } else {
+    setResultText(`Scanning leftovers for ${processedApps.size} processed application${processedApps.size === 1 ? '' : 's'}...`)
+    const result = await runBusy('Scanning uninstall leftovers...', () => window.optimizerGuard.scanUninstallLeftoversMany([...processedApps]))
+    if (!result) {
       setResultState('failed')
       setResultText('Leftover scan failed. No files or registry entries were changed.')
+      return
     }
+    setLeftovers(result)
+    setSelectedLeftovers(new Set(result.filter((item) => item.selectedByDefault && !item.protected).map((item) => item.id)))
+    setResultState('finished')
+    const message = result.length
+      ? `Scan finished. Review ${result.length} leftover item${result.length === 1 ? '' : 's'} before removal.`
+      : 'Scan finished. No high-confidence leftovers were found.'
+    setResultText(message)
+    setNotice(message)
   }
 
   async function removeLeftovers(): Promise<void> {
@@ -724,7 +787,7 @@ function UninstallerPanel({
       setNotice('Select at least one leftover first.')
       return
     }
-    if (!window.confirm(`Quarantine ${chosen.length} selected leftover${chosen.length === 1 ? '' : 's'}?\n\nFiles are moved to Optimizer Guard quarantine and registry keys are exported before removal. Personal folders and saves are excluded.`)) return
+    if (!window.confirm(`Quarantine ${chosen.length} selected leftover${chosen.length === 1 ? '' : 's'}?\n\nFiles are moved to Optimizer Guard quarantine and registry keys are exported first.`)) return
     setResultState('running')
     setResultText('Quarantining selected leftovers...')
     const result = await runBusy('Quarantining uninstall leftovers...', async () => {
@@ -732,136 +795,185 @@ function UninstallerPanel({
       assertLogsSuccess(removed.logs)
       return removed
     })
-    if (result) {
-      setLeftovers((current) => current.filter((item) => !selectedLeftovers.has(item.id)))
-      setSelectedLeftovers(new Set())
-      setResultState('finished')
-      setResultText(`Finished. ${result.removed} item${result.removed === 1 ? '' : 's'} quarantined (${formatBytes(result.quarantinedBytes)}); ${result.failed} failed.`)
-      setNotice('Leftover cleanup finished and a restore point was recorded.')
-    } else {
+    if (!result) {
       setResultState('failed')
-      setResultText('Leftover cleanup failed. Check Logs; successful moves remain restorable from Logs / Restore.')
+      setResultText('Leftover cleanup failed. Successful moves remain restorable from Logs.')
+      return
     }
+    setLeftovers((current) => current.filter((item) => !selectedLeftovers.has(item.id)))
+    setSelectedLeftovers(new Set())
+    setResultState('finished')
+    setResultText(`Finished. ${result.removed} quarantined (${formatBytes(result.quarantinedBytes)}); ${result.failed} failed.`)
+    setNotice('Leftover cleanup finished and a restore point was recorded.')
   }
 
   return (
     <section className="page uninstaller-page">
       <PageHero
-        eyebrow="Official uninstall, then reviewed cleanup"
-        title="Remove applications without blind deletion."
-        text="Uses Windows uninstall records first. Leftovers are scanned separately, reviewed by you, and quarantined before registry cleanup."
+        eyebrow="Batch uninstall manager"
+        title="Select once. Remove cleanly."
+        text="Filter every detected drive, uninstall multiple apps, use verified silent commands, then review or automatically quarantine safe leftovers."
         icon={<PackageOpen />}
       />
+      <div className="panel uninstall-commandbar">
+        <div className="search">
+          <Search size={15} />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, publisher, or install path..." />
+        </div>
+        <div className="drive-filters">
+          {drives.map((drive) => (
+            <button className={driveFilter === drive ? 'filter active' : 'filter'} key={drive} onClick={() => setDriveFilter(drive)}>
+              {drive} <small>{drive === 'All' ? apps.length : apps.filter((app) => app.installDrive === drive).length}</small>
+            </button>
+          ))}
+        </div>
+        <button onClick={() => void refreshApps()}>
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </div>
+
       <div className="uninstaller-layout">
         <div className="panel app-picker">
-          <div className="toolbar compact">
-            <div className="search">
-              <Search size={15} />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search installed apps..." />
-            </div>
-            <button onClick={() => void refreshApps()}>
-              <RefreshCw size={15} />
-              Refresh
-            </button>
+          <div className="selection-bar">
+            <label>
+              <input
+                type="checkbox"
+                checked={visibleApps.length > 0 && visibleApps.every((app) => selectedApps.has(app.id))}
+                onChange={(event) => {
+                  const next = new Set(selectedApps)
+                  for (const app of visibleApps) {
+                    if (event.target.checked) next.add(app.id)
+                    else next.delete(app.id)
+                  }
+                  setSelectedApps(next)
+                }}
+              />
+              Select visible
+            </label>
+            <span>{selectedApps.size} selected</span>
           </div>
           <div className="app-list">
             {visibleApps.map((app) => (
-              <button
-                className={selectedApp?.id === app.id ? 'app-row selected' : 'app-row'}
-                key={app.id}
-                onClick={() => {
-                  setSelectedApp(app)
-                  setLeftovers([])
-                  setSelectedLeftovers(new Set())
-                  setLaunchedAppId('')
-                  setResultState('idle')
-                }}
-              >
+              <label className={selectedApps.has(app.id) ? 'app-row selected' : 'app-row'} key={app.id}>
+                <input type="checkbox" checked={selectedApps.has(app.id)} onChange={(event) => toggleApp(app.id, event.target.checked)} />
                 <span className="app-icon"><PackageOpen size={17} /></span>
                 <span>
                   <strong>{app.name}</strong>
                   <small>{[app.publisher, app.version].filter(Boolean).join(' · ') || 'Publisher not listed'}</small>
+                  <small className="install-path">{app.installLocation || 'Install location not registered'}</small>
                 </span>
-                <small>{app.estimatedSizeBytes ? formatBytes(app.estimatedSizeBytes) : ''}</small>
-              </button>
+                <span className="app-row-meta">
+                  <span className="pill">{app.installDrive}</span>
+                  {app.supportsSilent && <span className="pill live">Silent</span>}
+                  <small>{app.estimatedSizeBytes ? formatBytes(app.estimatedSizeBytes) : ''}</small>
+                </span>
+                {statuses[app.id] && <small className="app-status">{statuses[app.id]}</small>}
+              </label>
             ))}
             {visibleApps.length === 0 && <span className="muted app-list-empty">No matching uninstall entries.</span>}
           </div>
         </div>
 
-        <div className="uninstaller-workspace">
-          {!selectedApp && <EmptyHint text="Select an application to inspect its registered uninstall details." setNotice={setNotice} />}
-          {selectedApp && (
-            <>
-              <div className="panel uninstall-summary">
-                <div>
-                  <span className="eyebrow">Selected application</span>
-                  <h2>{selectedApp.name}</h2>
-                  <p>{selectedApp.publisher || 'Publisher not listed'} {selectedApp.version ? `· ${selectedApp.version}` : ''}</p>
-                  <small className="muted">{selectedApp.installLocation || 'Install location not registered'}</small>
-                </div>
-                <div className="uninstall-actions">
-                  <button
-                    className="danger-button"
-                    onClick={() => void launch()}
-                    disabled={resultState === 'running' || launchedAppId === selectedApp.id}
-                  >
-                    {launchedAppId === selectedApp.id ? <CheckCircle2 size={15} /> : <Play size={15} />}
-                    {launchedAppId === selectedApp.id ? 'Uninstaller launched' : 'Run uninstaller'}
-                  </button>
-                  <button
-                    onClick={() => void scanLeftovers()}
-                    disabled={resultState === 'running' || launchedAppId !== selectedApp.id}
-                    title={launchedAppId === selectedApp.id ? 'Scan exact product leftovers' : 'Run and finish the official uninstaller first'}
-                  >
-                    <Search size={15} />
-                    Scan leftovers
-                  </button>
-                </div>
-              </div>
-              {resultState !== 'idle' && <OperationProgressCard progress={uninstallProgress} state={resultState} fallbackLabel={resultText} />}
-              {leftovers.length > 0 && (
-                <div className="panel leftovers-panel">
-                  <div className="table-head">
-                    <span>{leftovers.length} high-confidence leftovers</span>
-                    <span>{formatBytes(selectedBytes)} selected</span>
-                  </div>
-                  <div className="leftover-list">
-                    {leftovers.map((item) => (
-                      <label className="leftover-row" key={item.id}>
-                        <input
-                          type="checkbox"
-                          checked={selectedLeftovers.has(item.id)}
-                          disabled={item.protected}
-                          onChange={(event) => {
-                            const next = new Set(selectedLeftovers)
-                            if (event.target.checked) next.add(item.id)
-                            else next.delete(item.id)
-                            setSelectedLeftovers(next)
-                          }}
-                        />
-                        <span>
-                          <strong>{item.kind === 'registry' ? 'Registry entry' : 'File or folder'}</strong>
-                          <small>{item.path}</small>
-                          <small>{item.reason}</small>
-                        </span>
-                        <small>{item.kind === 'file' ? formatBytes(item.sizeBytes) : 'Registry'}</small>
-                      </label>
-                    ))}
-                  </div>
-                  <div className="toolbar compact">
-                    <button className="danger-button" onClick={() => void removeLeftovers()} disabled={selectedLeftovers.size === 0 || resultState === 'running'}>
-                      <Trash2 size={15} />
-                      Quarantine selected
-                    </button>
-                    <span className="muted">Game saves and personal folders are always excluded.</span>
-                  </div>
-                </div>
-              )}
-            </>
+        <aside className="panel batch-panel">
+          <span className="eyebrow">Uninstall queue</span>
+          <h2>{selectedApps.size || 'No'} app{selectedApps.size === 1 ? '' : 's'} selected</h2>
+          <p className="muted">{silentCapable} of {selectedApps.size} support verified silent uninstall.</p>
+          {silentMode && selectedApps.size > silentCapable && (
+            <span className="pill warn">{selectedApps.size - silentCapable} will be skipped</span>
           )}
-        </div>
+          <label className="mode-option">
+            <input
+              type="checkbox"
+              checked={silentMode}
+              onChange={(event) => {
+                setSilentMode(event.target.checked)
+                if (!event.target.checked) setAutoDeleteLeftovers(false)
+              }}
+            />
+            <span>
+              <strong>Silent mode</strong>
+              <small>One uninstall elevation, no vendor wizard. Auto-clean may request one additional UAC.</small>
+            </span>
+          </label>
+          <label className={silentMode ? 'mode-option' : 'mode-option disabled'}>
+            <input
+              type="checkbox"
+              checked={autoDeleteLeftovers}
+              disabled={!silentMode}
+              onChange={(event) => setAutoDeleteLeftovers(event.target.checked)}
+            />
+            <span>
+              <strong>Auto-clean leftovers</strong>
+              <small>Quarantine only high-confidence default items after successful uninstall.</small>
+            </span>
+          </label>
+          <button className="danger-button batch-action" onClick={() => void uninstallSelected()} disabled={selectedApps.size === 0 || resultState === 'running'}>
+            <Trash2 size={16} />
+            {silentMode ? 'Run silent batch' : 'Launch selected'}
+          </button>
+          <button onClick={() => void scanLeftovers()} disabled={processedApps.size === 0 || resultState === 'running' || autoDeleteLeftovers}>
+            <Search size={15} />
+            Review leftovers
+          </button>
+          <button
+            onClick={() => {
+              setSelectedApps(new Set())
+              setProcessedApps(new Set())
+              setStatuses({})
+              setLeftovers([])
+              setSelectedLeftovers(new Set())
+              setResultState('idle')
+              setResultText('')
+            }}
+            disabled={resultState === 'running'}
+          >
+            <RotateCcw size={15} />
+            Reset queue
+          </button>
+          <small className="muted">Manual review is the default. Auto-clean requires silent mode.</small>
+        </aside>
       </div>
+
+      {resultState !== 'idle' && <OperationProgressCard progress={uninstallProgress} state={resultState} fallbackLabel={resultText} />}
+      {leftovers.length > 0 && (
+        <div className="panel leftovers-panel wide">
+          <div className="table-head">
+            <span>{leftovers.length} high-confidence leftovers</span>
+            <span>{formatBytes(selectedBytes)} selected</span>
+          </div>
+          <div className="leftover-list">
+            {leftovers.map((item) => (
+              <label className="leftover-row" key={item.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedLeftovers.has(item.id)}
+                  disabled={item.protected}
+                  onChange={(event) => {
+                    const next = new Set(selectedLeftovers)
+                    if (event.target.checked) next.add(item.id)
+                    else next.delete(item.id)
+                    setSelectedLeftovers(next)
+                  }}
+                />
+                <span>
+                  <strong>{item.kind === 'registry' ? 'Registry entry' : 'File or folder'}</strong>
+                  <small>{item.path}</small>
+                  <small>{item.reason}</small>
+                </span>
+                <small>{item.kind === 'file' ? formatBytes(item.sizeBytes) : 'Registry'}</small>
+              </label>
+            ))}
+          </div>
+          <div className="toolbar compact">
+            <button className="danger-button" onClick={() => void removeLeftovers()} disabled={selectedLeftovers.size === 0 || resultState === 'running'}>
+              <Trash2 size={15} />
+              Quarantine selected
+            </button>
+            <span className="muted">Game saves and personal folders are always excluded.</span>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

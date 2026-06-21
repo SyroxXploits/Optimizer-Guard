@@ -47,7 +47,7 @@ Scan your system, review suggested optimizations, apply only what you choose, an
 - Task Disabler - search scheduled tasks, filter Microsoft/user tasks, enable or disable selected entries, and keep restore history.
 - System / BIOS Info - view BIOS, motherboard, CPU, GPU, display, Resizable BAR, Game Mode, and HAGS info in one place.
 - Cleaning - scan first, select what to clean, then remove safe temp, shader, browser, launcher, update, log, dump, and app cache targets with estimates.
-- Uninstaller - read Windows uninstall records, run the official product uninstaller, scan exact file/registry leftovers, and quarantine approved remnants with restore history.
+- Uninstaller - filter apps by drive, select multiple entries, run verified silent/MSI batches when supported, and choose automatic safe-leftover cleanup or manual quarantine review.
 - NVIDIA / DLSS Suggestions - pick DLSS mode, preset style, Reflex, Frame Generation behavior, and preferred resolution.
 - NVIDIA App resolution helper - patch safe NVIDIA App metadata from `3840x2160` to your preferred resolution, with backups.
 - Gaming tweaks - disable NVIDIA overlay, enable Game Mode, and disable Xbox Game DVR capture when selected.

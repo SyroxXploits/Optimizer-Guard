@@ -855,9 +855,46 @@ h3 {
   box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
+.persistent-tab {
+  display: none;
+}
+
+.persistent-tab.active {
+  display: contents;
+}
+
+.uninstall-commandbar {
+  padding: 10px;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.drive-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.drive-filters .filter {
+  height: 34px;
+  padding: 0 10px;
+}
+
+.drive-filters .filter small {
+  color: var(--muted);
+}
+
+.drive-filters .filter.active {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
 .uninstaller-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.35fr);
+  grid-template-columns: minmax(520px, 1fr) 310px;
   gap: 12px;
   min-height: 0;
 }
@@ -874,17 +911,40 @@ h3 {
 }
 
 .app-list {
-  max-height: calc(100vh - 280px);
+  max-height: calc(100vh - 390px);
   overflow: auto;
   border-top: 1px solid var(--line);
 }
 
+.selection-bar {
+  min-height: 42px;
+  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--soft);
+}
+
+.selection-bar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-bar input,
+.app-row > input,
+.mode-option input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+}
+
 .app-row {
   width: 100%;
-  min-height: 58px;
+  min-height: 72px;
   padding: 9px 11px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   border: 0;
@@ -892,6 +952,7 @@ h3 {
   border-radius: 0;
   background: transparent;
   text-align: left;
+  cursor: pointer;
 }
 
 .app-row:hover,
@@ -905,6 +966,10 @@ h3 {
 
 .app-row > span:nth-child(2),
 .leftover-row > span {
+  min-width: 0;
+}
+
+.app-row > span:nth-child(3) {
   min-width: 0;
 }
 
@@ -924,6 +989,29 @@ h3 {
   white-space: nowrap;
 }
 
+.app-row .install-path {
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.app-row-meta {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.app-row-meta .pill {
+  height: 22px;
+  font-size: 10px;
+}
+
+.app-status {
+  grid-column: 3 / -1;
+  white-space: normal !important;
+}
+
 .app-icon {
   width: 32px;
   height: 32px;
@@ -940,43 +1028,69 @@ h3 {
   padding: 18px;
 }
 
-.uninstaller-workspace {
-  min-width: 0;
-  display: grid;
-  align-content: start;
-  gap: 12px;
-}
-
-.uninstall-summary {
+.batch-panel {
   padding: 16px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
+  align-content: start;
+  gap: 10px;
 }
 
-.uninstall-summary h2,
-.uninstall-summary p {
-  margin: 4px 0;
+.batch-panel h2,
+.batch-panel p {
+  margin: 0;
 }
 
-.uninstall-summary .eyebrow {
+.batch-panel > small {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.batch-panel .eyebrow {
   color: var(--accent);
 }
 
-.uninstall-summary p {
-  color: var(--soft);
+.mode-option {
+  padding: 11px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
 }
 
-.uninstall-actions {
-  display: grid;
-  gap: 8px;
+.mode-option strong,
+.mode-option small {
+  display: block;
+}
+
+.mode-option small {
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.mode-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.batch-action {
+  margin-top: 4px;
+  height: 42px;
 }
 
 .leftover-list {
-  max-height: calc(100vh - 500px);
+  max-height: 280px;
   min-height: 100px;
   overflow: auto;
+}
+
+.leftovers-panel.wide {
+  padding: 0;
 }
 
 .leftover-row {
@@ -1201,7 +1315,7 @@ h3 {
   .form-grid,
   .spec-list.two,
   .uninstaller-layout,
-  .uninstall-summary {
+  .uninstall-commandbar {
     grid-template-columns: 1fr;
   }
 }

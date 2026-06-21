@@ -3,6 +3,8 @@ import type {
   AppSettings,
   AppSnapshot,
   ApplyNvidiaProfileRequest,
+  BatchUninstallRequest,
+  BatchUninstallResult,
   CleanResult,
   CleanTarget,
   CommandLogEntry,
@@ -62,7 +64,9 @@ const demoInstalledApps: InstalledApp[] = [
     quietUninstallString: '',
     estimatedSizeBytes: 2785017856,
     registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AuroraPhotoStudio',
-    systemComponent: false
+    systemComponent: false,
+    installDrive: 'C:',
+    supportsSilent: false
   },
   {
     id: 'demo-app-2',
@@ -75,7 +79,9 @@ const demoInstalledApps: InstalledApp[] = [
     quietUninstallString: '',
     estimatedSizeBytes: 419430400,
     registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{11111111-2222-3333-4444-555555555555}',
-    systemComponent: false
+    systemComponent: false,
+    installDrive: 'C:',
+    supportsSilent: true
   },
   {
     id: 'demo-app-3',
@@ -88,7 +94,9 @@ const demoInstalledApps: InstalledApp[] = [
     quietUninstallString: '',
     estimatedSizeBytes: 805306368,
     registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NebulaLauncher',
-    systemComponent: false
+    systemComponent: false,
+    installDrive: 'D:',
+    supportsSilent: true
   }
 ]
 
@@ -116,12 +124,12 @@ const demoLeftovers: LeftoverCandidate[] = [
 ]
 
 const demoApi = {
-  appVersion: async () => '1.1.2',
+  appVersion: async () => '1.2.0',
   checkForUpdates: async () => ({
-    currentVersion: '1.1.2',
-    latestVersion: '1.1.2',
-    releaseName: 'Optimizer Guard v1.1.2',
-    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.2',
+    currentVersion: '1.2.0',
+    latestVersion: '1.2.0',
+    releaseName: 'Optimizer Guard v1.2.0',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.2.0',
     isUpdateAvailable: false
   }),
   minimize: async () => undefined,
@@ -323,7 +331,19 @@ const demoApi = {
     app: demoInstalledApps.find((item) => item.id === appId) ?? demoInstalledApps[0],
     log: demoSnapshot.logs[0]
   }) as UninstallLaunchResult,
+  batchUninstall: async (request: BatchUninstallRequest) => ({
+    items: request.appIds.map((id) => ({
+      app: demoInstalledApps.find((item) => item.id === id) ?? demoInstalledApps[0],
+      status: request.silent ? 'completed' : 'launched',
+      message: request.silent ? 'Silent uninstall completed.' : 'Uninstaller launched.',
+      log: demoSnapshot.logs[0]
+    })),
+    leftoversRemoved: request.autoDeleteLeftovers ? demoLeftovers.length : 0,
+    leftoverFailures: 0,
+    logs: [demoSnapshot.logs[0]]
+  }) as BatchUninstallResult,
   scanUninstallLeftovers: async (appId: string) => demoLeftovers.filter((item) => item.appId === appId),
+  scanUninstallLeftoversMany: async (appIds: string[]) => demoLeftovers.filter((item) => appIds.includes(item.appId)),
   removeUninstallLeftovers: async (ids: string[]) => ({
     removed: ids.length,
     failed: 0,
@@ -436,7 +456,9 @@ const optimizerGuard = process.env.OPTIMIZER_GUARD_DEMO === '1' ? demoApi : {
   },
   queryInstalledApps: (): Promise<InstalledApp[]> => ipcRenderer.invoke('uninstall:query'),
   launchUninstaller: (appId: string): Promise<UninstallLaunchResult> => ipcRenderer.invoke('uninstall:launch', appId),
+  batchUninstall: (request: BatchUninstallRequest): Promise<BatchUninstallResult> => ipcRenderer.invoke('uninstall:batch', request),
   scanUninstallLeftovers: (appId: string): Promise<LeftoverCandidate[]> => ipcRenderer.invoke('uninstall:scan-leftovers', appId),
+  scanUninstallLeftoversMany: (appIds: string[]): Promise<LeftoverCandidate[]> => ipcRenderer.invoke('uninstall:scan-leftovers-many', appIds),
   removeUninstallLeftovers: (ids: string[]): Promise<LeftoverRemovalResult> => ipcRenderer.invoke('uninstall:remove-leftovers', ids),
 
   getNvidiaState: (): Promise<NvidiaState> => ipcRenderer.invoke('nvidia:state'),

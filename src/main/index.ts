@@ -4,7 +4,7 @@ import { join } from 'path'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { OptimizerService } from './optimizer'
-import type { AppSettings, ApplyNvidiaProfileRequest, UpdateCheckResult } from '../shared/types'
+import type { AppSettings, ApplyNvidiaProfileRequest, BatchUninstallRequest, UpdateCheckResult } from '../shared/types'
 
 const REPOSITORY = 'SyroxXploits/Optimizer-Guard'
 const RELEASES_URL = `https://github.com/${REPOSITORY}/releases/latest`
@@ -139,7 +139,29 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
       error: error instanceof Error ? error.message : String(error)
     })
   }
-  await check('installed apps query', "window.optimizerGuard.queryInstalledApps().then((apps) => ({ count: apps.length, sample: apps.slice(0, 5).map((app) => ({ name: app.name, publisher: app.publisher, version: app.version })) }))")
+  await check('installed apps query', "window.optimizerGuard.queryInstalledApps().then((apps) => ({ count: apps.length, drives: [...new Set(apps.map((app) => app.installDrive))], silent: apps.filter((app) => app.supportsSilent).length, sample: apps.slice(0, 5).map((app) => ({ name: app.name, publisher: app.publisher, version: app.version, drive: app.installDrive })) }))")
+  await check('installed app ids remain stable', `
+    Promise.all([window.optimizerGuard.queryInstalledApps(), window.optimizerGuard.queryInstalledApps()]).then(([first, second]) => {
+      const stable = first.slice(0, 20).every((app, index) => app.id === second[index]?.id)
+      if (!stable) throw new Error('Installed app IDs changed between refreshes.')
+      return { checked: Math.min(20, first.length), stable }
+    })
+  `)
+  try {
+    const uninstallPlan = await service.smokeTestUninstallPlanning()
+    results.checks.push({
+      name: 'silent uninstall planning',
+      ok: uninstallPlan.invalid.length === 0,
+      value: uninstallPlan,
+      error: uninstallPlan.invalid.length ? `Invalid silent plans: ${uninstallPlan.invalid.join(', ')}` : undefined
+    })
+  } catch (error) {
+    results.checks.push({
+      name: 'silent uninstall planning',
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  }
   await check('uninstall leftover scan', "window.optimizerGuard.queryInstalledApps().then((apps) => apps[0] ? window.optimizerGuard.scanUninstallLeftovers(apps[0].id).then((items) => ({ app: apps[0].name, count: items.length, kinds: [...new Set(items.map((item) => item.kind))] })) : ({ app: '', count: 0, kinds: [] }))")
   await check('uninstall candidates avoid shared vendor roots', `
     window.optimizerGuard.queryInstalledApps().then(async (apps) => {
@@ -167,9 +189,52 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
         if (!button) throw new Error('Missing tab ' + label)
         button.click()
         await new Promise((resolve) => setTimeout(resolve, 250))
-        visited.push(document.querySelector('.hero h1')?.textContent || label)
+        visited.push(document.querySelector('.persistent-tab.active .hero h1, main > .page .hero h1')?.textContent || label)
       }
       return visited
+    })()
+  `)
+  await check('cleaning state survives tab switching', `
+    (async () => {
+      const navButton = (label) => Array.from(document.querySelectorAll('nav button')).find((item) => item.textContent?.trim() === label)
+      navButton('Cleaning')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      Array.from(document.querySelectorAll('.persistent-tab.active button')).find((item) => item.textContent?.trim() === 'Scan')?.click()
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        if (document.querySelectorAll('.clean-card').length > 0) break
+      }
+      const before = document.querySelectorAll('.clean-card').length
+      navButton('System')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      navButton('Cleaning')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const after = document.querySelectorAll('.persistent-tab.active .clean-card').length
+      if (!before || before !== after) throw new Error('Cleaning results reset after tab switch.')
+      return { before, after }
+    })()
+  `)
+  await check('uninstaller state container and drive filters survive tab switching', `
+    (async () => {
+      const button = (label) => Array.from(document.querySelectorAll('nav button')).find((item) => item.textContent?.trim() === label)
+      const apps = await window.optimizerGuard.queryInstalledApps()
+      button('Uninstaller')?.click()
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        if (document.querySelectorAll('.persistent-tab.active .app-row').length > 0) break
+      }
+      const filters = Array.from(document.querySelectorAll('.persistent-tab.active .drive-filters button')).map((item) => item.textContent?.trim())
+      for (const drive of [...new Set(apps.map((app) => app.installDrive))]) {
+        if (!filters.some((label) => label?.startsWith(drive))) throw new Error('Missing drive filter ' + drive)
+      }
+      const beforePanel = document.querySelector('.persistent-tab.active .uninstaller-page')
+      button('Cleaning')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      button('Uninstaller')?.click()
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const afterPanel = document.querySelector('.persistent-tab.active .uninstaller-page')
+      if (!beforePanel || beforePanel !== afterPanel) throw new Error('Uninstaller component was remounted after tab switch.')
+      return { filters, rows: document.querySelectorAll('.persistent-tab.active .app-row').length, samePanel: true }
     })()
   `)
 
@@ -195,10 +260,10 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
       file: 'uninstaller.png',
       wait: 1200,
       before: `(async () => {
-        window.confirm = () => true
-        Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Run uninstaller'))?.click()
-        await new Promise((resolve) => setTimeout(resolve, 250))
-        Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Scan leftovers'))?.click()
+        const boxes = Array.from(document.querySelectorAll('.app-row > input'))
+        boxes.slice(0, 2).forEach((box) => box.click())
+        const silent = document.querySelector('.mode-option input')
+        if (silent && !silent.checked) silent.click()
       })()`
     },
     { tab: 'NVIDIA', file: 'nvidia-dlss.png' },
@@ -264,8 +329,14 @@ function registerIpc(): void {
   )
   ipcMain.handle('uninstall:query', () => service.queryInstalledApps())
   ipcMain.handle('uninstall:launch', (_event, appId: string) => service.launchUninstaller(appId))
+  ipcMain.handle('uninstall:batch', (event, request: BatchUninstallRequest) =>
+    service.batchUninstall(request, (progress) => event.sender.send('operation:progress', progress))
+  )
   ipcMain.handle('uninstall:scan-leftovers', (event, appId: string) =>
     service.scanUninstallLeftovers(appId, (progress) => event.sender.send('operation:progress', progress))
+  )
+  ipcMain.handle('uninstall:scan-leftovers-many', (event, appIds: string[]) =>
+    service.scanUninstallLeftoversMany(appIds, (progress) => event.sender.send('operation:progress', progress))
   )
   ipcMain.handle('uninstall:remove-leftovers', (event, ids: string[]) =>
     service.removeUninstallLeftovers(ids, (progress) => event.sender.send('operation:progress', progress))
