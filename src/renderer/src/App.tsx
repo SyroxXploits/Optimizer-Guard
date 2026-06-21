@@ -657,6 +657,7 @@ function UninstallerPanel({
   const [selectedApp, setSelectedApp] = useState<InstalledApp | null>(null)
   const [leftovers, setLeftovers] = useState<LeftoverCandidate[]>([])
   const [selectedLeftovers, setSelectedLeftovers] = useState<Set<string>>(new Set())
+  const [launchedAppId, setLaunchedAppId] = useState('')
   const [resultState, setResultState] = useState<'idle' | 'running' | 'finished' | 'failed'>('idle')
   const [resultText, setResultText] = useState('')
   const uninstallProgress = progress?.operation.startsWith('uninstall-') ? progress : null
@@ -681,11 +682,15 @@ function UninstallerPanel({
     if (!window.confirm(`Run the registered uninstaller for ${selectedApp.name}?\n\nOptimizer Guard will not remove leftovers until you scan and approve them afterward.`)) return
     setResultState('running')
     setResultText('Launching the application vendor uninstaller...')
-    const result = await runBusy(`Launching ${selectedApp.name} uninstaller...`, () => window.optimizerGuard.launchUninstaller(selectedApp.id))
+    const result = await runBusy(`Launching ${selectedApp.name} uninstaller...`, async () => {
+      const launched = await window.optimizerGuard.launchUninstaller(selectedApp.id)
+      assertCommandSuccess(launched.log)
+      return launched
+    })
     if (result) {
-      assertCommandSuccess(result.log)
       setResultState('finished')
       setResultText('Uninstaller launched. Finish its wizard, then click Scan leftovers.')
+      setLaunchedAppId(selectedApp.id)
       setNotice('Official uninstaller launched. Complete it before scanning leftovers.')
     } else {
       setResultState('failed')
@@ -702,7 +707,11 @@ function UninstallerPanel({
       setLeftovers(result)
       setSelectedLeftovers(new Set(result.filter((item) => item.selectedByDefault && !item.protected).map((item) => item.id)))
       setResultState('finished')
-      setResultText(result.length ? `Scan finished. Review ${result.length} leftover item${result.length === 1 ? '' : 's'} before removal.` : 'Scan finished. No high-confidence leftovers were found.')
+      const message = result.length
+        ? `Scan finished. Review ${result.length} leftover item${result.length === 1 ? '' : 's'} before removal.`
+        : 'Scan finished. No high-confidence leftovers were found.'
+      setResultText(message)
+      setNotice(message)
     } else {
       setResultState('failed')
       setResultText('Leftover scan failed. No files or registry entries were changed.')
@@ -718,9 +727,12 @@ function UninstallerPanel({
     if (!window.confirm(`Quarantine ${chosen.length} selected leftover${chosen.length === 1 ? '' : 's'}?\n\nFiles are moved to Optimizer Guard quarantine and registry keys are exported before removal. Personal folders and saves are excluded.`)) return
     setResultState('running')
     setResultText('Quarantining selected leftovers...')
-    const result = await runBusy('Quarantining uninstall leftovers...', () => window.optimizerGuard.removeUninstallLeftovers([...selectedLeftovers]))
+    const result = await runBusy('Quarantining uninstall leftovers...', async () => {
+      const removed = await window.optimizerGuard.removeUninstallLeftovers([...selectedLeftovers])
+      assertLogsSuccess(removed.logs)
+      return removed
+    })
     if (result) {
-      assertLogsSuccess(result.logs)
       setLeftovers((current) => current.filter((item) => !selectedLeftovers.has(item.id)))
       setSelectedLeftovers(new Set())
       setResultState('finished')
@@ -761,6 +773,7 @@ function UninstallerPanel({
                   setSelectedApp(app)
                   setLeftovers([])
                   setSelectedLeftovers(new Set())
+                  setLaunchedAppId('')
                   setResultState('idle')
                 }}
               >
@@ -788,11 +801,19 @@ function UninstallerPanel({
                   <small className="muted">{selectedApp.installLocation || 'Install location not registered'}</small>
                 </div>
                 <div className="uninstall-actions">
-                  <button className="danger-button" onClick={() => void launch()} disabled={resultState === 'running'}>
-                    <Play size={15} />
-                    Run uninstaller
+                  <button
+                    className="danger-button"
+                    onClick={() => void launch()}
+                    disabled={resultState === 'running' || launchedAppId === selectedApp.id}
+                  >
+                    {launchedAppId === selectedApp.id ? <CheckCircle2 size={15} /> : <Play size={15} />}
+                    {launchedAppId === selectedApp.id ? 'Uninstaller launched' : 'Run uninstaller'}
                   </button>
-                  <button onClick={() => void scanLeftovers()} disabled={resultState === 'running'}>
+                  <button
+                    onClick={() => void scanLeftovers()}
+                    disabled={resultState === 'running' || launchedAppId !== selectedApp.id}
+                    title={launchedAppId === selectedApp.id ? 'Scan exact product leftovers' : 'Run and finish the official uninstaller first'}
+                  >
                     <Search size={15} />
                     Scan leftovers
                   </button>
@@ -854,8 +875,13 @@ function OperationProgressCard({
   state: 'idle' | 'running' | 'finished' | 'failed'
   fallbackLabel: string
 }): JSX.Element {
-  const percent = progress && progress.total > 0 ? Math.min(100, Math.round((progress.current / progress.total) * 100)) : state === 'finished' ? 100 : 8
-  const label = progress?.label || fallbackLabel
+  const liveProgress = state === 'running' && progress?.state === 'running' ? progress : null
+  const percent = liveProgress && liveProgress.total > 0
+    ? Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))
+    : state === 'finished'
+      ? 100
+      : 8
+  const label = liveProgress?.label || fallbackLabel
   return (
     <div className={`operation-progress ${state}`}>
       <div className="operation-progress-head">

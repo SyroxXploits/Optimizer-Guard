@@ -50,13 +50,78 @@ const demoSnapshot = {
   ]
 } as AppSnapshot
 
+const demoInstalledApps: InstalledApp[] = [
+  {
+    id: 'demo-app-1',
+    name: 'Aurora Photo Studio',
+    publisher: 'Northstar Software',
+    version: '5.4.2',
+    installDate: '2026-04-18',
+    installLocation: 'C:\\Program Files\\Northstar Software\\Aurora Photo Studio',
+    uninstallString: '"C:\\Program Files\\Northstar Software\\Aurora Photo Studio\\uninstall.exe"',
+    quietUninstallString: '',
+    estimatedSizeBytes: 2785017856,
+    registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AuroraPhotoStudio',
+    systemComponent: false
+  },
+  {
+    id: 'demo-app-2',
+    name: 'Comet RGB Controller',
+    publisher: 'Comet Devices',
+    version: '3.8.0',
+    installDate: '2026-03-02',
+    installLocation: 'C:\\Program Files\\Comet Devices\\Comet RGB Controller',
+    uninstallString: 'MsiExec.exe /I{11111111-2222-3333-4444-555555555555}',
+    quietUninstallString: '',
+    estimatedSizeBytes: 419430400,
+    registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{11111111-2222-3333-4444-555555555555}',
+    systemComponent: false
+  },
+  {
+    id: 'demo-app-3',
+    name: 'Nebula Game Launcher',
+    publisher: 'Nebula Interactive',
+    version: '2.1.7',
+    installDate: '2026-05-21',
+    installLocation: 'C:\\Program Files\\Nebula\\Nebula Game Launcher',
+    uninstallString: '"C:\\Program Files\\Nebula\\Nebula Game Launcher\\unins000.exe"',
+    quietUninstallString: '',
+    estimatedSizeBytes: 805306368,
+    registryPath: 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NebulaLauncher',
+    systemComponent: false
+  }
+]
+
+const demoLeftovers: LeftoverCandidate[] = [
+  {
+    id: 'demo-leftover-1',
+    appId: 'demo-app-1',
+    kind: 'file',
+    path: 'C:\\Users\\Player\\AppData\\Local\\Aurora Photo Studio',
+    reason: 'Exact product data folder',
+    sizeBytes: 184549376,
+    selectedByDefault: true,
+    protected: false
+  },
+  {
+    id: 'demo-leftover-2',
+    appId: 'demo-app-1',
+    kind: 'registry',
+    path: 'HKEY_CURRENT_USER\\Software\\Northstar Software\\Aurora Photo Studio',
+    reason: 'Exact per-user publisher/product registry key',
+    sizeBytes: 0,
+    selectedByDefault: false,
+    protected: false
+  }
+]
+
 const demoApi = {
-  appVersion: async () => '1.1.0',
+  appVersion: async () => '1.1.1',
   checkForUpdates: async () => ({
-    currentVersion: '1.1.0',
-    latestVersion: '1.1.0',
-    releaseName: 'Optimizer Guard v1.1.0',
-    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.0',
+    currentVersion: '1.1.1',
+    latestVersion: '1.1.1',
+    releaseName: 'Optimizer Guard v1.1.1',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.1',
     isUpdateAvailable: false
   }),
   minimize: async () => undefined,
@@ -253,10 +318,18 @@ const demoApi = {
   ],
   cleanSelected: async () => ({ beforeBytes: 2254857830, afterBytes: 0, savedBytes: 2254857830, logs: demoSnapshot.logs }),
   onOperationProgress: () => () => undefined,
-  queryInstalledApps: async () => [] as InstalledApp[],
-  launchUninstaller: async () => ({ app: {} as InstalledApp, log: demoSnapshot.logs[0] }) as UninstallLaunchResult,
-  scanUninstallLeftovers: async () => [] as LeftoverCandidate[],
-  removeUninstallLeftovers: async () => ({ removed: 0, failed: 0, quarantinedBytes: 0, logs: [] }) as LeftoverRemovalResult,
+  queryInstalledApps: async () => demoInstalledApps,
+  launchUninstaller: async (appId: string) => ({
+    app: demoInstalledApps.find((item) => item.id === appId) ?? demoInstalledApps[0],
+    log: demoSnapshot.logs[0]
+  }) as UninstallLaunchResult,
+  scanUninstallLeftovers: async (appId: string) => demoLeftovers.filter((item) => item.appId === appId),
+  removeUninstallLeftovers: async (ids: string[]) => ({
+    removed: ids.length,
+    failed: 0,
+    quarantinedBytes: demoLeftovers.filter((item) => ids.includes(item.id)).reduce((sum, item) => sum + item.sizeBytes, 0),
+    logs: [demoSnapshot.logs[0]]
+  }) as LeftoverRemovalResult,
   getNvidiaState: async () => ({
     profile: {
       gpuName: 'NVIDIA GeForce RTX 4070 Ti SUPER',

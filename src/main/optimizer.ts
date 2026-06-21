@@ -527,14 +527,16 @@ export class OptimizerService {
     if (!installedApp) throw new Error('This application record is stale. Refresh the installed app list and try again.')
     const command = parseUninstallCommand(installedApp.uninstallString)
     if (!command) throw new Error('Windows did not provide a usable uninstall command for this application.')
-    const executable = command.executable.toLowerCase().endsWith('msiexec.exe') ? 'msiexec.exe' : command.executable
+    const expandedExecutable = expandEnv(command.executable)
+    const executable = expandedExecutable.toLowerCase().endsWith('msiexec.exe') ? 'msiexec.exe' : expandedExecutable
     const args = executable.toLowerCase().endsWith('msiexec.exe')
       ? command.args.map((arg) => (/^\/i(?=\{)/i.test(arg) ? arg.replace(/^\/i/i, '/x') : arg))
       : command.args
+    const argumentLine = args.map(quoteWindowsArgument).join(' ')
     const script = [
       `$file = '${escapePowerShellSingle(executable)}'`,
-      `$arguments = @(${args.map((arg) => `'${escapePowerShellSingle(arg)}'`).join(', ')})`,
-      "Start-Process -FilePath $file -ArgumentList $arguments -Verb RunAs",
+      `$argumentLine = '${escapePowerShellSingle(argumentLine)}'`,
+      "Start-Process -FilePath $file -ArgumentList $argumentLine -Verb RunAs",
       `'Launched registered uninstaller for ${escapePowerShellSingle(installedApp.name)}.'`
     ].join('\n')
     const log = await this.runPowerShell(script, {
@@ -1096,7 +1098,7 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
     const launchScript = [
       `$helper = '${escapedHelperScript}'`,
       "$arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $helper)",
-      "Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList $arguments"
+      "Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments | Out-Null"
     ].join('\n')
     const launch = await this.runCommandRaw(
       'powershell.exe',
@@ -1108,10 +1110,11 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
         encodePowerShell(launchScript)
       ],
       true,
-      timeoutMs
+      Math.min(timeoutMs, 120_000)
     )
 
-    for (let attempt = 0; attempt < 20 && !existsSync(resultFile); attempt += 1) {
+    const resultDeadline = Date.now() + timeoutMs
+    while (launch.success && !existsSync(resultFile) && Date.now() < resultDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
 
@@ -1134,11 +1137,13 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
         launch.stderr ? `Launcher stderr:\n${launch.stderr}` : '',
         `Elevated action did not return a result file: ${resultFile}`,
         `Helper script: ${helperScript}`,
-        'UAC may have been cancelled, blocked by policy, or PowerShell elevation may have failed.'
+        launch.success
+          ? `Elevated action timed out after ${Math.round(timeoutMs / 1000)} seconds.`
+          : 'UAC may have been cancelled, blocked by policy, or PowerShell elevation may have failed.'
       ]
         .filter(Boolean)
         .join('\n')
-      exitCode = exitCode === 0 ? 1 : exitCode
+      exitCode = launch.success ? 124 : exitCode === 0 ? 1 : exitCode
     }
     return this.addLog({
       kind,
@@ -1405,6 +1410,11 @@ function parseUninstallCommand(commandLine: string): { executable: string; args:
   return { executable, args }
 }
 
+function quoteWindowsArgument(value: string): string {
+  if (!value || /[\s"]/.test(value)) return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`
+  return value
+}
+
 function formatInstallDate(value: string): string {
   return /^\d{8}$/.test(value) ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}` : value
 }
@@ -1429,8 +1439,13 @@ function buildLeftoverDefinitions(installedApp: InstalledApp): LeftoverCandidate
     })
   }
 
-  if (installedApp.installLocation) add('file', expandEnv(installedApp.installLocation), 'Recorded installation directory', true)
   const names = exactProductNames(installedApp.name)
+  if (installedApp.installLocation) {
+    const installLocation = expandEnv(installedApp.installLocation)
+    if (isSpecificInstallLocation(installLocation, installedApp, names)) {
+      add('file', installLocation, 'Recorded product installation directory', true)
+    }
+  }
   const roots = [
     process.env.LOCALAPPDATA,
     process.env.APPDATA,
@@ -1467,7 +1482,13 @@ function exactProductNames(displayName: string): string[] {
     .replace(/\s+\((?:x64|x86|64-bit|32-bit)\)\s*$/i, '')
     .replace(/\s+v?\d+(?:\.\d+){1,4}\s*$/i, '')
     .trim()
-  return [...new Set([displayName.trim(), cleaned].filter((item) => item && item.length >= 2 && !/[<>:"/\\|?*]/.test(item)))]
+  return [
+    ...new Set(
+      [displayName.trim(), cleaned].filter(
+        (item) => item && item.length >= 2 && item !== '.' && item !== '..' && !/[<>:"/\\|?*]/.test(item)
+      )
+    )
+  ]
 }
 
 function isSafeUninstallCandidate(path: string): boolean {
@@ -1489,6 +1510,20 @@ function isSafeUninstallCandidate(path: string): boolean {
     process.env.USERPROFILE ? join(process.env.USERPROFILE, name).toLowerCase() : ''
   )
   return !personalRoots.some((root) => root && (normalized === root || normalized.startsWith(`${root}\\`)))
+}
+
+function isSpecificInstallLocation(path: string, installedApp: InstalledApp, productNames: string[]): boolean {
+  if (!isSafeUninstallCandidate(path)) return false
+  const normalized = path.replace(/[\\/]+$/, '')
+  const leaf = normalized.split('\\').filter(Boolean).at(-1)?.toLowerCase() ?? ''
+  const publisherNames = exactProductNames(installedApp.publisher).map((item) => item.toLowerCase())
+  if (!leaf || publisherNames.includes(leaf)) return false
+
+  const searchable = normalized.toLowerCase().replace(/[^a-z0-9]+/g, ' ')
+  const meaningfulTokens = productNames
+    .flatMap((name) => name.toLowerCase().split(/[^a-z0-9]+/))
+    .filter((token) => token.length >= 3 && !/^\d+$/.test(token) && !['update', 'setup', 'installer', 'application'].includes(token))
+  return meaningfulTokens.some((token) => searchable.includes(token))
 }
 
 function isAdminPath(path: string): boolean {

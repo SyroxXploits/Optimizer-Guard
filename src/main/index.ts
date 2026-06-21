@@ -10,13 +10,15 @@ const REPOSITORY = 'SyroxXploits/Optimizer-Guard'
 const RELEASES_URL = `https://github.com/${REPOSITORY}/releases/latest`
 
 let mainWindow: BrowserWindow | null = null
-const service = new OptimizerService()
 
 if (process.env.OPTIMIZER_GUARD_SMOKE === '1' || process.env.OPTIMIZER_GUARD_CAPTURE === '1') {
   const debugUserData = join(process.cwd(), 'debug', process.env.OPTIMIZER_GUARD_SMOKE === '1' ? 'user-data-smoke' : 'user-data-capture')
   mkdirSync(debugUserData, { recursive: true })
   app.setPath('userData', debugUserData)
+  if (process.env.OPTIMIZER_GUARD_CAPTURE === '1') process.env.OPTIMIZER_GUARD_DEMO = '1'
 }
+
+const service = new OptimizerService()
 
 function createWindow(): void {
   const workArea = screen.getPrimaryDisplay().workAreaSize
@@ -111,6 +113,21 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
   await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")
   await check('installed apps query', "window.optimizerGuard.queryInstalledApps().then((apps) => ({ count: apps.length, sample: apps.slice(0, 5).map((app) => ({ name: app.name, publisher: app.publisher, version: app.version })) }))")
   await check('uninstall leftover scan', "window.optimizerGuard.queryInstalledApps().then((apps) => apps[0] ? window.optimizerGuard.scanUninstallLeftovers(apps[0].id).then((items) => ({ app: apps[0].name, count: items.length, kinds: [...new Set(items.map((item) => item.kind))] })) : ({ app: '', count: 0, kinds: [] }))")
+  await check('uninstall candidates avoid shared vendor roots', `
+    window.optimizerGuard.queryInstalledApps().then(async (apps) => {
+      const app = apps[0]
+      if (!app) return { checked: false }
+      const items = await window.optimizerGuard.scanUninstallLeftovers(app.id)
+      const publisherLeaf = app.publisher.toLowerCase().replace(/[®™©]/g, '').trim()
+      const unsafe = items.filter((item) => {
+        if (item.kind !== 'file') return false
+        const leaf = item.path.replace(/[\\\\/]+$/, '').split(/[\\\\/]/).pop()?.toLowerCase() || ''
+        return leaf === publisherLeaf
+      })
+      if (unsafe.length) throw new Error('Shared publisher roots were offered as leftovers: ' + unsafe.map((item) => item.path).join(', '))
+      return { checked: true, candidates: items.length }
+    })
+  `)
   await check('nvidia detection', "window.optimizerGuard.getNvidiaState().then((state) => ({ gpu: state.profile.gpuName, detectedResolution: state.profile.detectedResolution, preferredResolution: state.profile.preferredResolution, dlssMode: state.profile.dlssMode }))")
   await check('update checker', "window.optimizerGuard.checkForUpdates().then((update) => ({ currentVersion: update.currentVersion, latestVersion: update.latestVersion, error: update.error || '' }))")
   await check('tab click through', `
@@ -145,7 +162,17 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
     { tab: 'Tasks', file: 'task-disabler.png' },
     { tab: 'System', file: 'system-info.png' },
     { tab: 'Cleaning', file: 'cleaning.png', before: "document.querySelector('.primary')?.click()" },
-    { tab: 'Uninstaller', file: 'uninstaller.png', wait: 3500 },
+    {
+      tab: 'Uninstaller',
+      file: 'uninstaller.png',
+      wait: 1200,
+      before: `(async () => {
+        window.confirm = () => true
+        Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Run uninstaller'))?.click()
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Scan leftovers'))?.click()
+      })()`
+    },
     { tab: 'NVIDIA', file: 'nvidia-dlss.png' },
     { tab: 'Logs', file: 'logs-restore.png' },
     { tab: 'About', file: 'about-updates.png' }
