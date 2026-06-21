@@ -764,6 +764,23 @@ h3 {
   cursor: pointer;
 }
 
+.clean-card > div {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  gap: 5px 7px;
+}
+
+.clean-card strong,
+.clean-card p {
+  width: 100%;
+}
+
+.clean-card .muted {
+  white-space: normal;
+}
+
 .clean-card input,
 .action-check input {
   width: 17px;
@@ -773,6 +790,208 @@ h3 {
 
 .clean-card.dim {
   opacity: 0.58;
+}
+
+.operation-progress {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.operation-progress.finished {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+.operation-progress.failed {
+  border-color: rgba(255, 119, 119, 0.42);
+}
+
+.operation-progress-head,
+.operation-progress-head span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.operation-progress-head > span:last-child {
+  color: var(--soft);
+}
+
+.operation-progress.finished .operation-progress-head svg {
+  color: var(--accent);
+}
+
+.operation-progress.failed .operation-progress-head svg {
+  color: #ff8d8d;
+}
+
+.operation-progress small {
+  display: block;
+  margin-top: 7px;
+  color: var(--soft);
+}
+
+.progress-track {
+  height: 7px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 5px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 240ms ease;
+}
+
+.operation-progress.running .progress-track span {
+  box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.uninstaller-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.35fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.app-picker,
+.leftovers-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.toolbar.compact {
+  margin: 0;
+  padding: 10px;
+}
+
+.app-list {
+  max-height: calc(100vh - 280px);
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+.app-row {
+  width: 100%;
+  min-height: 58px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.app-row:hover,
+.app-row.selected {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.app-row.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.app-row > span:nth-child(2),
+.leftover-row > span {
+  min-width: 0;
+}
+
+.app-row strong,
+.app-row small,
+.leftover-row strong,
+.leftover-row small {
+  display: block;
+}
+
+.app-row small,
+.leftover-row small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.app-list-empty {
+  display: block;
+  padding: 18px;
+}
+
+.uninstaller-workspace {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.uninstall-summary {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.uninstall-summary h2,
+.uninstall-summary p {
+  margin: 4px 0;
+}
+
+.uninstall-summary .eyebrow {
+  color: var(--accent);
+}
+
+.uninstall-summary p {
+  color: var(--soft);
+}
+
+.uninstall-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.leftover-list {
+  max-height: calc(100vh - 500px);
+  min-height: 100px;
+  overflow: auto;
+}
+
+.leftover-row {
+  padding: 11px 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.leftover-row input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
 }
 
 .form-grid {
@@ -980,7 +1199,9 @@ h3 {
   .split,
   .about-grid,
   .form-grid,
-  .spec-list.two {
+  .spec-list.two,
+  .uninstaller-layout,
+  .uninstall-summary {
     grid-template-columns: 1fr;
   }
 }

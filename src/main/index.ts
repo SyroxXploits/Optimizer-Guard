@@ -109,11 +109,13 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
   await check('features query', "window.optimizerGuard.queryFeatures().then((features) => features.map((feature) => ({ id: feature.id, state: feature.state })))")
   await check('system info query', "window.optimizerGuard.getSystemInfo().then((info) => ({ cpu: info.cpu.name, cpuClock: info.cpu.currentClockMhz, gpu: info.gpu.name, gpuClock: info.gpu.graphicsClockMhz, memoryGb: info.memoryGb, resizableBar: info.gpu.resizableBar, displays: info.displays, gameMode: info.gameMode, hags: info.hags }))")
   await check('cleaning scan', "window.optimizerGuard.scanCleaning().then((targets) => ({ count: targets.length, detected: targets.filter((target) => target.detected).length, estimatedBytes: targets.reduce((sum, target) => sum + target.estimatedBytes, 0) }))")
+  await check('installed apps query', "window.optimizerGuard.queryInstalledApps().then((apps) => ({ count: apps.length, sample: apps.slice(0, 5).map((app) => ({ name: app.name, publisher: app.publisher, version: app.version })) }))")
+  await check('uninstall leftover scan', "window.optimizerGuard.queryInstalledApps().then((apps) => apps[0] ? window.optimizerGuard.scanUninstallLeftovers(apps[0].id).then((items) => ({ app: apps[0].name, count: items.length, kinds: [...new Set(items.map((item) => item.kind))] })) : ({ app: '', count: 0, kinds: [] }))")
   await check('nvidia detection', "window.optimizerGuard.getNvidiaState().then((state) => ({ gpu: state.profile.gpuName, detectedResolution: state.profile.detectedResolution, preferredResolution: state.profile.preferredResolution, dlssMode: state.profile.dlssMode }))")
   await check('update checker', "window.optimizerGuard.checkForUpdates().then((update) => ({ currentVersion: update.currentVersion, latestVersion: update.latestVersion, error: update.error || '' }))")
   await check('tab click through', `
     (async () => {
-      const labels = ['Tasks', 'System', 'Cleaning', 'NVIDIA', 'Logs', 'About']
+      const labels = ['Tasks', 'System', 'Cleaning', 'Uninstaller', 'NVIDIA', 'Logs', 'About']
       const visited = []
       for (const label of labels) {
         const button = Array.from(document.querySelectorAll('button')).find((item) => item.textContent?.includes(label))
@@ -143,6 +145,7 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
     { tab: 'Tasks', file: 'task-disabler.png' },
     { tab: 'System', file: 'system-info.png' },
     { tab: 'Cleaning', file: 'cleaning.png', before: "document.querySelector('.primary')?.click()" },
+    { tab: 'Uninstaller', file: 'uninstaller.png', wait: 3500 },
     { tab: 'NVIDIA', file: 'nvidia-dlss.png' },
     { tab: 'Logs', file: 'logs-restore.png' },
     { tab: 'About', file: 'about-updates.png' }
@@ -152,7 +155,7 @@ async function captureScreenshots(window: BrowserWindow | null): Promise<void> {
     await window.webContents.executeJavaScript(`
       Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes(${JSON.stringify(shot.tab)}))?.click()
     `)
-    await wait(900)
+    await wait(shot.wait ?? 900)
     if (shot.before) {
       await window.webContents.executeJavaScript(shot.before)
       await wait(900)
@@ -198,8 +201,20 @@ function registerIpc(): void {
     service.setFeature(featureName, enable, false)
   )
 
-  ipcMain.handle('clean:scan', () => service.scanCleaningTargets())
-  ipcMain.handle('clean:run', (_event, ids: string[]) => service.cleanTargets(ids, false))
+  ipcMain.handle('clean:scan', (event) =>
+    service.scanCleaningTargets((progress) => event.sender.send('operation:progress', progress))
+  )
+  ipcMain.handle('clean:run', (event, ids: string[]) =>
+    service.cleanTargets(ids, false, (progress) => event.sender.send('operation:progress', progress))
+  )
+  ipcMain.handle('uninstall:query', () => service.queryInstalledApps())
+  ipcMain.handle('uninstall:launch', (_event, appId: string) => service.launchUninstaller(appId))
+  ipcMain.handle('uninstall:scan-leftovers', (event, appId: string) =>
+    service.scanUninstallLeftovers(appId, (progress) => event.sender.send('operation:progress', progress))
+  )
+  ipcMain.handle('uninstall:remove-leftovers', (event, ids: string[]) =>
+    service.removeUninstallLeftovers(ids, (progress) => event.sender.send('operation:progress', progress))
+  )
 
   ipcMain.handle('nvidia:state', () => service.queryNvidiaState())
   ipcMain.handle('nvidia:apply', (_event, request: ApplyNvidiaProfileRequest) =>

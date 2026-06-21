@@ -1,4 +1,4 @@
-export type ActionKind = 'task' | 'feature' | 'clean' | 'nvidia' | 'system' | 'restore'
+export type ActionKind = 'task' | 'feature' | 'clean' | 'uninstall' | 'nvidia' | 'system' | 'restore'
 
 export interface CommandLogEntry {
   id: string
@@ -117,6 +117,51 @@ export interface CleanResult {
   savedBytes: number
   logs: CommandLogEntry[]
   targets?: CleanTarget[]
+}
+
+export interface OperationProgress {
+  operation: 'clean-scan' | 'clean-run' | 'uninstall-scan' | 'uninstall-remove'
+  current: number
+  total: number
+  label: string
+  state: 'running' | 'finished' | 'failed'
+}
+
+export interface InstalledApp {
+  id: string
+  name: string
+  publisher: string
+  version: string
+  installDate: string
+  installLocation: string
+  uninstallString: string
+  quietUninstallString: string
+  estimatedSizeBytes: number
+  registryPath: string
+  systemComponent: boolean
+}
+
+export interface UninstallLaunchResult {
+  app: InstalledApp
+  log: CommandLogEntry
+}
+
+export interface LeftoverCandidate {
+  id: string
+  appId: string
+  kind: 'file' | 'registry'
+  path: string
+  reason: string
+  sizeBytes: number
+  selectedByDefault: boolean
+  protected: boolean
+}
+
+export interface LeftoverRemovalResult {
+  removed: number
+  failed: number
+  quarantinedBytes: number
+  logs: CommandLogEntry[]
 }
 
 export interface NvidiaProfile {

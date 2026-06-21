@@ -1,7 +1,7 @@
 import { app, shell } from 'electron'
 import { spawn } from 'child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { dirname, join } from 'path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { dirname, join, parse } from 'path'
 import os from 'os'
 import type {
   AppSettings,
@@ -11,11 +11,16 @@ import type {
   CleanTarget,
   CommandLogEntry,
   FeatureToggle,
+  InstalledApp,
+  LeftoverCandidate,
+  LeftoverRemovalResult,
   NvidiaProfile,
   NvidiaState,
+  OperationProgress,
   RestoreEntry,
   ScheduledTaskRow,
-  SystemInfo
+  SystemInfo,
+  UninstallLaunchResult
 } from '../shared/types'
 
 interface CleanEstimate {
@@ -29,6 +34,7 @@ interface CommandOptions {
   label: string
   dryRun?: boolean
   elevated?: boolean
+  timeoutMs?: number
 }
 
 interface TaskVerification {
@@ -64,6 +70,8 @@ export class OptimizerService {
   private logs: CommandLogEntry[] = []
   private restoreHistory: RestoreEntry[] = []
   private settings: AppSettings = defaultSettings
+  private installedApps = new Map<string, InstalledApp>()
+  private uninstallLeftovers = new Map<string, LeftoverCandidate>()
 
   constructor() {
     this.dataDir = join(app.getPath('userData'), 'optimizer-guard')
@@ -410,8 +418,16 @@ export class OptimizerService {
     }
   }
 
-  async scanCleaningTargets(): Promise<CleanTarget[]> {
-    return this.buildCleanTargets(this.getCleanDefinitions())
+  async scanCleaningTargets(progress?: (progress: OperationProgress) => void): Promise<CleanTarget[]> {
+    progress?.({ operation: 'clean-scan', current: 0, total: 1, label: 'Checking safe cleanup locations...', state: 'running' })
+    try {
+      const result = await this.buildCleanTargets(this.getCleanDefinitions())
+      progress?.({ operation: 'clean-scan', current: 1, total: 1, label: 'Scan finished', state: 'finished' })
+      return result
+    } catch (error) {
+      progress?.({ operation: 'clean-scan', current: 1, total: 1, label: 'Scan failed', state: 'failed' })
+      throw error
+    }
   }
 
   private async buildCleanTargets(targets: CleanTarget[]): Promise<CleanTarget[]> {
@@ -428,28 +444,194 @@ export class OptimizerService {
     })
   }
 
-  async cleanTargets(ids: string[], dryRun: boolean): Promise<CleanResult> {
+  async cleanTargets(ids: string[], dryRun: boolean, progress?: (progress: OperationProgress) => void): Promise<CleanResult> {
     const definitions = this.getCleanDefinitions().filter((target) => ids.includes(target.id))
-    const targets = await this.buildCleanTargets(definitions)
-    const beforeBytes = targets.reduce((sum, target) => sum + target.estimatedBytes, 0)
-    const logs: CommandLogEntry[] = []
+    const total = Math.max(1, definitions.length + 2)
+    try {
+      progress?.({ operation: 'clean-run', current: 0, total, label: 'Measuring selected targets...', state: 'running' })
+      const targets = await this.buildCleanTargets(definitions)
+      const beforeBytes = targets.reduce((sum, target) => sum + target.estimatedBytes, 0)
+      const logs: CommandLogEntry[] = []
 
-    for (const target of targets) {
-      if (target.commandOnly) {
-        logs.push(await this.runCleaningCommand(target, dryRun))
-      } else {
-        const expandedPaths = target.paths.map(expandEnv)
-        const script = safeDeleteScript(expandedPaths)
-        const run = target.requiresAdmin
-          ? await this.runElevatedPowerShell(script, `Clean ${target.label}`, dryRun, 'clean')
-          : await this.runPowerShell(script, { kind: 'clean', label: `Clean ${target.label}`, dryRun })
-        logs.push(run)
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index]
+        progress?.({ operation: 'clean-run', current: index + 1, total, label: `Cleaning ${target.label}...`, state: 'running' })
+        if (target.commandOnly) {
+          logs.push(await this.runCleaningCommand(target, dryRun))
+        } else {
+          const expandedPaths = target.paths.map(expandEnv)
+          const script = safeDeleteScript(expandedPaths)
+          const run = target.requiresAdmin
+            ? await this.runElevatedPowerShell(script, `Clean ${target.label}`, dryRun, 'clean', 180_000)
+            : await this.runPowerShell(script, { kind: 'clean', label: `Clean ${target.label}`, dryRun, timeoutMs: 120_000 })
+          logs.push(run)
+        }
       }
-    }
 
-    const afterTargets = await this.buildCleanTargets(definitions)
-    const afterBytes = afterTargets.reduce((sum, target) => sum + target.estimatedBytes, 0)
-    return { beforeBytes, afterBytes, savedBytes: Math.max(0, beforeBytes - afterBytes), logs, targets: afterTargets }
+      progress?.({ operation: 'clean-run', current: total - 1, total, label: 'Measuring freed space...', state: 'running' })
+      const afterTargets = await this.buildCleanTargets(definitions)
+      const afterBytes = afterTargets.reduce((sum, target) => sum + target.estimatedBytes, 0)
+      const failed = logs.filter((log) => !log.success)
+      progress?.({
+        operation: 'clean-run',
+        current: total,
+        total,
+        label: failed.length ? `Cleanup finished with ${failed.length} failed target${failed.length === 1 ? '' : 's'}` : 'Cleanup finished',
+        state: failed.length ? 'failed' : 'finished'
+      })
+      return { beforeBytes, afterBytes, savedBytes: Math.max(0, beforeBytes - afterBytes), logs, targets: afterTargets }
+    } catch (error) {
+      progress?.({ operation: 'clean-run', current: total, total, label: 'Cleanup stopped with an error', state: 'failed' })
+      throw error
+    }
+  }
+
+  async queryInstalledApps(): Promise<InstalledApp[]> {
+    const result = await this.runPowerShell(installedAppsScript(), {
+      kind: 'uninstall',
+      label: 'Query installed applications',
+      timeoutMs: 45_000
+    })
+    if (!result.success || !result.stdout.trim()) return []
+    try {
+      const parsed = JSON.parse(result.stdout.trim())
+      const rows = (Array.isArray(parsed) ? parsed : [parsed]) as Array<Record<string, unknown>>
+      this.installedApps.clear()
+      return rows
+        .map((row) => {
+          const app: InstalledApp = {
+            id: cryptoId(),
+            name: String(row.name ?? '').trim(),
+            publisher: String(row.publisher ?? '').trim(),
+            version: String(row.version ?? '').trim(),
+            installDate: formatInstallDate(String(row.installDate ?? '')),
+            installLocation: String(row.installLocation ?? '').trim(),
+            uninstallString: String(row.uninstallString ?? '').trim(),
+            quietUninstallString: String(row.quietUninstallString ?? '').trim(),
+            estimatedSizeBytes: Math.max(0, Number(row.estimatedSizeKb ?? 0) * 1024),
+            registryPath: String(row.registryPath ?? '').replace(/^Microsoft\.PowerShell\.Core\\Registry::/i, ''),
+            systemComponent: Number(row.systemComponent ?? 0) === 1
+          }
+          this.installedApps.set(app.id, app)
+          return app
+        })
+        .filter((item) => item.name && item.uninstallString && !item.systemComponent)
+        .sort((a, b) => a.name.localeCompare(b.name))
+    } catch {
+      return []
+    }
+  }
+
+  async launchUninstaller(appId: string): Promise<UninstallLaunchResult> {
+    const installedApp = this.installedApps.get(appId)
+    if (!installedApp) throw new Error('This application record is stale. Refresh the installed app list and try again.')
+    const command = parseUninstallCommand(installedApp.uninstallString)
+    if (!command) throw new Error('Windows did not provide a usable uninstall command for this application.')
+    const executable = command.executable.toLowerCase().endsWith('msiexec.exe') ? 'msiexec.exe' : command.executable
+    const args = executable.toLowerCase().endsWith('msiexec.exe')
+      ? command.args.map((arg) => (/^\/i(?=\{)/i.test(arg) ? arg.replace(/^\/i/i, '/x') : arg))
+      : command.args
+    const script = [
+      `$file = '${escapePowerShellSingle(executable)}'`,
+      `$arguments = @(${args.map((arg) => `'${escapePowerShellSingle(arg)}'`).join(', ')})`,
+      "Start-Process -FilePath $file -ArgumentList $arguments -Verb RunAs",
+      `'Launched registered uninstaller for ${escapePowerShellSingle(installedApp.name)}.'`
+    ].join('\n')
+    const log = await this.runPowerShell(script, {
+      kind: 'uninstall',
+      label: `Launch uninstaller for ${installedApp.name}`,
+      timeoutMs: 30_000
+    })
+    return { app: installedApp, log }
+  }
+
+  async scanUninstallLeftovers(appId: string, progress?: (progress: OperationProgress) => void): Promise<LeftoverCandidate[]> {
+    const installedApp = this.installedApps.get(appId)
+    if (!installedApp) throw new Error('Refresh the installed app list before scanning leftovers.')
+    progress?.({ operation: 'uninstall-scan', current: 0, total: 1, label: `Scanning leftovers for ${installedApp.name}...`, state: 'running' })
+    const definitions = buildLeftoverDefinitions(installedApp)
+    const fileDefinitions = definitions.filter((item) => item.kind === 'file')
+    const registryDefinitions = definitions.filter((item) => item.kind === 'registry')
+    const estimateJson = JSON.stringify(fileDefinitions.map((item) => ({ id: item.id, paths: [item.path] })))
+    const estimates = fileDefinitions.length > 0 ? await this.estimateArbitraryTargets(estimateJson) : {}
+    const existingRegistryIds = await this.findExistingRegistryCandidates(registryDefinitions)
+    this.uninstallLeftovers.clear()
+    const candidates = definitions
+      .filter((item) => item.kind === 'registry' ? existingRegistryIds.has(item.id) : Boolean(estimates[item.id]?.exists))
+      .map((item) => ({
+        ...item,
+        sizeBytes: item.kind === 'file' ? Number(estimates[item.id]?.bytes ?? 0) : 0
+      }))
+    for (const candidate of candidates) this.uninstallLeftovers.set(candidate.id, candidate)
+    progress?.({ operation: 'uninstall-scan', current: 1, total: 1, label: `Found ${candidates.length} reviewable leftovers`, state: 'finished' })
+    return candidates
+  }
+
+  private async findExistingRegistryCandidates(candidates: LeftoverCandidate[]): Promise<Set<string>> {
+    if (candidates.length === 0) return new Set()
+    const payload = JSON.stringify(candidates.map((item) => ({ id: item.id, path: item.path })))
+    const script = `
+$itemsJson = @'
+${payload}
+'@
+$items = $itemsJson | ConvertFrom-Json
+$found = foreach ($item in $items) {
+  if (Test-Path -LiteralPath ('Registry::' + $item.path)) { [string]$item.id }
+}
+@($found) | ConvertTo-Json -Compress
+`
+    const result = await this.runPowerShell(script, {
+      kind: 'uninstall',
+      label: 'Check uninstall registry leftovers',
+      timeoutMs: 15_000
+    })
+    if (!result.success || !result.stdout.trim()) return new Set()
+    try {
+      const parsed = JSON.parse(result.stdout.trim())
+      return new Set((Array.isArray(parsed) ? parsed : [parsed]).map(String))
+    } catch {
+      return new Set()
+    }
+  }
+
+  async removeUninstallLeftovers(ids: string[], progress?: (progress: OperationProgress) => void): Promise<LeftoverRemovalResult> {
+    const candidates = ids.map((id) => this.uninstallLeftovers.get(id)).filter((item): item is LeftoverCandidate => Boolean(item))
+    if (candidates.length === 0) return { removed: 0, failed: 0, quarantinedBytes: 0, logs: [] }
+    if (candidates.some((item) => item.protected)) throw new Error('Protected personal-data candidates cannot be removed by Optimizer Guard.')
+    const quarantine = join(this.dataDir, 'uninstall-quarantine', new Date().toISOString().replace(/[:.]/g, '-'))
+    const payload = JSON.stringify(candidates.map((item) => ({ ...item, quarantineName: `${item.id}-${safeFileName(item.path.split('\\').pop() || 'leftover')}` })))
+    progress?.({ operation: 'uninstall-remove', current: 0, total: 1, label: 'Quarantining selected leftovers...', state: 'running' })
+    const script = uninstallLeftoverRemovalScript(payload, quarantine)
+    const requiresAdmin = candidates.some((item) => item.path.startsWith('HKEY_LOCAL_MACHINE') || isAdminPath(item.path))
+    const log = requiresAdmin
+      ? await this.runElevatedPowerShell(script, 'Quarantine uninstall leftovers', false, 'uninstall', 180_000)
+      : await this.runPowerShell(script, { kind: 'uninstall', label: 'Quarantine uninstall leftovers', timeoutMs: 180_000 })
+    let summary = { removed: 0, failed: candidates.length, quarantinedBytes: 0 }
+    try {
+      const parsed = JSON.parse(log.stdout.trim())
+      summary = {
+        removed: Number(parsed.removed ?? 0),
+        failed: Number(parsed.failed ?? 0),
+        quarantinedBytes: Number(parsed.quarantinedBytes ?? 0)
+      }
+    } catch {}
+    if (log.success && summary.removed > 0) {
+      this.addRestore({
+        kind: 'registry',
+        label: `Restore quarantined leftovers from ${quarantine}`,
+        command: 'powershell.exe',
+        args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', uninstallLeftoverRestoreScript(quarantine)],
+        elevated: requiresAdmin
+      })
+    }
+    progress?.({
+      operation: 'uninstall-remove',
+      current: 1,
+      total: 1,
+      label: log.success ? 'Leftover cleanup finished' : 'Leftover cleanup failed',
+      state: log.success ? 'finished' : 'failed'
+    })
+    return { ...summary, logs: [log] }
   }
 
   async queryNvidiaState(): Promise<NvidiaState> {
@@ -600,20 +782,22 @@ export class OptimizerService {
 
   private async runCleaningCommand(target: CleanTarget, dryRun: boolean): Promise<CommandLogEntry> {
     if (target.id === 'dism-component-store') {
-      return this.runElevatedPowerShell('DISM /Online /Cleanup-Image /StartComponentCleanup', 'DISM component store cleanup', dryRun, 'clean')
+      return this.runElevatedPowerShell('DISM /Online /Cleanup-Image /StartComponentCleanup', 'DISM component store cleanup', dryRun, 'clean', 15 * 60_000)
     }
     if (target.id === 'cleanmgr') {
       return this.runCommand('cleanmgr.exe', ['/sagerun:1'], {
         kind: 'clean',
         label: 'Run Disk Cleanup profile 1',
-        dryRun
+        dryRun,
+        timeoutMs: 10 * 60_000
       })
     }
     if (target.id === 'cleanmgr-sageset') {
       return this.runCommand('cleanmgr.exe', ['/sageset:1'], {
         kind: 'clean',
         label: 'Open Disk Cleanup sageset UI',
-        dryRun
+        dryRun,
+        timeoutMs: 30_000
       })
     }
     if (target.id === 'recycle-bin') {
@@ -624,10 +808,10 @@ export class OptimizerService {
       })
     }
     if (target.id === 'branch-cache') {
-      return this.runElevatedPowerShell('Clear-BCCache -Force -ErrorAction SilentlyContinue; "BranchCache cleared."', 'Clear BranchCache', dryRun, 'clean')
+      return this.runElevatedPowerShell('Clear-BCCache -Force -ErrorAction SilentlyContinue; "BranchCache cleared."', 'Clear BranchCache', dryRun, 'clean', 120_000)
     }
     if (target.id === 'store-cache') {
-      return this.runCommand('wsreset.exe', [], { kind: 'clean', label: 'Reset Microsoft Store cache', dryRun })
+      return this.runCommand('wsreset.exe', [], { kind: 'clean', label: 'Reset Microsoft Store cache', dryRun, timeoutMs: 120_000 })
     }
     if (target.id === 'dns-cache') {
       return this.runCommand('ipconfig.exe', ['/flushdns'], { kind: 'clean', label: 'Flush DNS cache', dryRun })
@@ -687,49 +871,50 @@ export class OptimizerService {
   }
 
   private async estimateTargets(targets: CleanTarget[]): Promise<Record<string, CleanEstimate>> {
-    const json = JSON.stringify(targets.map((target) => ({ id: target.id, paths: target.paths.map(expandEnv) })))
-    const script = [
-      `$targetsJson = @'\n${json}\n'@`,
-      '$targets = $targetsJson | ConvertFrom-Json',
-      '$result = @{}',
-      '$maxFilesPerTarget = 12000',
-      '$maxMsPerTarget = 650',
-      'foreach ($target in $targets) {',
-      '  $timer = [System.Diagnostics.Stopwatch]::StartNew()',
-      '  [int64]$total = 0',
-      '  [int]$files = 0',
-      '  [bool]$partial = $false',
-      '  foreach ($p in $target.paths) {',
-      '    if ($timer.ElapsedMilliseconds -gt $maxMsPerTarget -or $files -ge $maxFilesPerTarget) { $partial = $true; break }',
-      '    try {',
-      '      foreach ($item in Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) {',
-      '        $total += $item.Length',
-      '        $files++',
-      '        if ($timer.ElapsedMilliseconds -gt $maxMsPerTarget -or $files -ge $maxFilesPerTarget) { $partial = $true; break }',
-      '      }',
-      '    } catch {}',
-      '    if ($partial) { break }',
-      '  }',
-      '  $result[$target.id] = [pscustomobject]@{ bytes = $total; partial = $partial; files = $files }',
-      '}',
-      '$result | ConvertTo-Json -Compress'
-    ].join('\n')
-    const result = await this.runPowerShell(script, { kind: 'clean', label: 'Estimate cleanup target sizes' })
-    try {
-      const raw = JSON.parse(result.stdout.trim()) as Record<string, { bytes?: number; partial?: boolean; files?: number }>
-      return Object.fromEntries(
-        Object.entries(raw).map(([id, estimate]) => [
-          id,
-          {
-            bytes: Number(estimate.bytes ?? 0),
-            partial: Boolean(estimate.partial),
-            files: Number(estimate.files ?? 0)
-          }
-        ])
-      )
-    } catch {
-      return {}
+    const groups = targets.map((target) => ({ id: target.id, paths: target.paths.map(expandEnv) }))
+    const raw = this.estimatePathGroups(groups)
+    return Object.fromEntries(
+      Object.entries(raw).map(([id, estimate]) => [
+        id,
+        {
+          bytes: Number(estimate.bytes ?? 0),
+          partial: Boolean(estimate.partial),
+          files: Number(estimate.files ?? 0)
+        }
+      ])
+    )
+  }
+
+  private async estimateArbitraryTargets(
+    json: string
+  ): Promise<Record<string, { bytes: number; partial: boolean; files: number; exists: boolean }>> {
+    const groups = JSON.parse(json) as Array<{ id: string; paths: string[] }>
+    return this.estimatePathGroups(groups)
+  }
+
+  private estimatePathGroups(
+    groups: Array<{ id: string; paths: string[] }>
+  ): Record<string, { bytes: number; partial: boolean; files: number; exists: boolean }> {
+    const started = Date.now()
+    const globalDeadline = started + 8_000
+    const estimates: Record<string, { bytes: number; partial: boolean; files: number; exists: boolean }> = {}
+    for (const group of groups) {
+      const deadline = Math.min(globalDeadline, Date.now() + 350)
+      estimates[group.id] = estimatePathPatterns(group.paths, deadline, 5000)
     }
+    this.addLog({
+      kind: 'clean',
+      label: 'Estimate cleanup target sizes',
+      command: 'internal filesystem scanner',
+      args: [`${groups.length} targets`, `${Date.now() - started}ms`],
+      stdout: JSON.stringify(estimates),
+      stderr: '',
+      exitCode: 0,
+      success: true,
+      dryRun: false,
+      elevated: false
+    })
+    return estimates
   }
 
   private async queryNvidiaQuery(): Promise<{
@@ -866,7 +1051,13 @@ export class OptimizerService {
     return this.runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShell(powerShellPrelude(script))], options)
   }
 
-  private async runElevatedPowerShell(script: string, label: string, _dryRun: boolean, kind: CommandLogEntry['kind']): Promise<CommandLogEntry> {
+  private async runElevatedPowerShell(
+    script: string,
+    label: string,
+    _dryRun: boolean,
+    kind: CommandLogEntry['kind'],
+    timeoutMs = 10 * 60_000
+  ): Promise<CommandLogEntry> {
     const sharedRoot = process.env.ProgramData ? join(process.env.ProgramData, 'OptimizerGuard') : this.dataDir
     const workDir = join(sharedRoot, 'elevated')
     mkdirSync(workDir, { recursive: true })
@@ -916,7 +1107,8 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
         '-EncodedCommand',
         encodePowerShell(launchScript)
       ],
-      true
+      true,
+      timeoutMs
     )
 
     for (let attempt = 0; attempt < 20 && !existsSync(resultFile); attempt += 1) {
@@ -962,18 +1154,43 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
     })
   }
 
-  private async runCommandRaw(command: string, args: string[], elevated = false): Promise<Omit<CommandLogEntry, 'id' | 'timestamp' | 'kind' | 'label' | 'dryRun'>> {
+  private async runCommandRaw(
+    command: string,
+    args: string[],
+    elevated = false,
+    timeoutMs = 10 * 60_000
+  ): Promise<Omit<CommandLogEntry, 'id' | 'timestamp' | 'kind' | 'label' | 'dryRun'>> {
     return new Promise((resolve) => {
       const child = spawn(command, args, { windowsHide: true })
       let stdout = ''
       let stderr = ''
+      let settled = false
+      let timedOut = false
+      const finish = (result: Omit<CommandLogEntry, 'id' | 'timestamp' | 'kind' | 'label' | 'dryRun'>): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(result)
+      }
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill()
+      }, timeoutMs)
       child.stdout.on('data', (chunk) => (stdout += chunk.toString()))
       child.stderr.on('data', (chunk) => (stderr += chunk.toString()))
       child.on('error', (error) => {
-        resolve({ command, args, stdout, stderr: `${stderr}${error.message}`, exitCode: 1, success: false, elevated })
+        finish({ command, args, stdout, stderr: `${stderr}${error.message}`, exitCode: 1, success: false, elevated })
       })
       child.on('close', (code) => {
-        resolve({ command, args, stdout, stderr, exitCode: code, success: code === 0, elevated })
+        finish({
+          command,
+          args,
+          stdout,
+          stderr: timedOut ? `${stderr}\nTimed out after ${Math.round(timeoutMs / 1000)} seconds.`.trim() : stderr,
+          exitCode: timedOut ? 124 : code,
+          success: !timedOut && code === 0,
+          elevated
+        })
       })
     })
   }
@@ -983,39 +1200,48 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
       const child = spawn(command, args, { windowsHide: true })
       let stdout = ''
       let stderr = ''
+      let settled = false
+      let timedOut = false
+      const timeoutMs = options.timeoutMs ?? 10 * 60_000
+      const finish = (entry: Omit<CommandLogEntry, 'id' | 'timestamp'>): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(this.addLog(entry))
+      }
+      const timer = setTimeout(() => {
+        timedOut = true
+        child.kill()
+      }, timeoutMs)
       child.stdout.on('data', (chunk) => (stdout += chunk.toString()))
       child.stderr.on('data', (chunk) => (stderr += chunk.toString()))
       child.on('error', (error) => {
-        resolve(
-          this.addLog({
-            kind: options.kind,
-            label: options.label,
-            command,
-            args,
-            stdout,
-            stderr: `${stderr}${error.message}`,
-            exitCode: 1,
-            success: false,
-            dryRun: false,
-            elevated: Boolean(options.elevated)
-          })
-        )
+        finish({
+          kind: options.kind,
+          label: options.label,
+          command,
+          args,
+          stdout,
+          stderr: `${stderr}${error.message}`,
+          exitCode: 1,
+          success: false,
+          dryRun: false,
+          elevated: Boolean(options.elevated)
+        })
       })
       child.on('close', (code) => {
-        resolve(
-          this.addLog({
-            kind: options.kind,
-            label: options.label,
-            command,
-            args,
-            stdout,
-            stderr,
-            exitCode: code,
-            success: code === 0,
-            dryRun: false,
-            elevated: Boolean(options.elevated)
-          })
-        )
+        finish({
+          kind: options.kind,
+          label: options.label,
+          command,
+          args,
+          stdout,
+          stderr: timedOut ? `${stderr}\nTimed out after ${Math.round(timeoutMs / 1000)} seconds.`.trim() : stderr,
+          exitCode: timedOut ? 124 : code,
+          success: !timedOut && code === 0,
+          dryRun: false,
+          elevated: Boolean(options.elevated)
+        })
       })
     })
   }
@@ -1055,6 +1281,284 @@ if (Test-Path -LiteralPath '${escapedStderrFile}') { $err = (($err | Out-String)
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
   }
+}
+
+function estimatePathPatterns(
+  patterns: string[],
+  deadline: number,
+  maxFiles: number
+): { bytes: number; partial: boolean; files: number; exists: boolean } {
+  let bytes = 0
+  let files = 0
+  let exists = false
+  let partial = false
+  const stack: string[] = []
+
+  for (const pattern of patterns) {
+    if (Date.now() >= deadline) {
+      partial = true
+      break
+    }
+    const expanded = expandLocalGlob(pattern, deadline)
+    if (expanded.partial) partial = true
+    if (expanded.paths.length > 0) exists = true
+    stack.push(...expanded.paths)
+  }
+
+  while (stack.length > 0) {
+    if (Date.now() >= deadline || files >= maxFiles) {
+      partial = true
+      break
+    }
+    const current = stack.pop()!
+    try {
+      const info = lstatSync(current)
+      if (info.isSymbolicLink()) continue
+      if (info.isFile()) {
+        bytes += info.size
+        files += 1
+        continue
+      }
+      if (info.isDirectory()) {
+        for (const entry of readdirSync(current)) stack.push(join(current, entry))
+      }
+    } catch {}
+  }
+  return { bytes, partial, files, exists }
+}
+
+function expandLocalGlob(pattern: string, deadline: number): { paths: string[]; partial: boolean } {
+  const normalized = pattern.replace(/\//g, '\\')
+  const root = parse(normalized).root
+  const segments = normalized.slice(root.length).split('\\').filter(Boolean)
+  let paths = [root]
+  let partial = false
+  for (const segment of segments) {
+    if (Date.now() >= deadline) return { paths: [], partial: true }
+    if (!/[*?]/.test(segment)) {
+      paths = paths.map((base) => join(base, segment))
+      continue
+    }
+    const matcher = globSegmentRegex(segment)
+    const matches: string[] = []
+    for (const base of paths) {
+      try {
+        for (const name of readdirSync(base)) {
+          if (matcher.test(name)) matches.push(join(base, name))
+          if (matches.length >= 500 || Date.now() >= deadline) {
+            partial = true
+            break
+          }
+        }
+      } catch {}
+      if (partial) break
+    }
+    paths = matches
+  }
+  return { paths: paths.filter((item) => existsSync(item)), partial }
+}
+
+function globSegmentRegex(segment: string): RegExp {
+  const escaped = segment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  return new RegExp(`^${escaped}$`, 'i')
+}
+
+function installedAppsScript(): string {
+  return `
+$roots = @(
+  'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+)
+$apps = foreach ($root in $roots) {
+  Get-ItemProperty -Path $root -ErrorAction SilentlyContinue | Where-Object {
+    $_.DisplayName -and ($_.UninstallString -or $_.QuietUninstallString)
+  } | ForEach-Object {
+    [pscustomobject]@{
+      name = [string]$_.DisplayName
+      publisher = [string]$_.Publisher
+      version = [string]$_.DisplayVersion
+      installDate = [string]$_.InstallDate
+      installLocation = [string]$_.InstallLocation
+      uninstallString = [string]$(if ($_.UninstallString) { $_.UninstallString } else { $_.QuietUninstallString })
+      quietUninstallString = [string]$_.QuietUninstallString
+      estimatedSizeKb = [int64]$(if ($_.EstimatedSize) { $_.EstimatedSize } else { 0 })
+      registryPath = [string]$_.PSPath
+      systemComponent = [int]$(if ($_.SystemComponent) { $_.SystemComponent } else { 0 })
+    }
+  }
+}
+$apps | Sort-Object name, version -Unique | ConvertTo-Json -Depth 4 -Compress
+`
+}
+
+function parseUninstallCommand(commandLine: string): { executable: string; args: string[] } | null {
+  const trimmed = commandLine.trim()
+  const match = trimmed.match(/^"?(.+?\.exe)"?\s*(.*)$/i)
+  if (!match) return null
+  const executable = match[1].trim()
+  const args: string[] = []
+  const remainder = match[2].trim()
+  const tokenPattern = /"([^"]*)"|(\S+)/g
+  let token: RegExpExecArray | null
+  while ((token = tokenPattern.exec(remainder))) args.push(token[1] ?? token[2])
+  return { executable, args }
+}
+
+function formatInstallDate(value: string): string {
+  return /^\d{8}$/.test(value) ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}` : value
+}
+
+function buildLeftoverDefinitions(installedApp: InstalledApp): LeftoverCandidate[] {
+  const candidates: LeftoverCandidate[] = []
+  const seen = new Set<string>()
+  const add = (kind: LeftoverCandidate['kind'], path: string, reason: string, selectedByDefault: boolean): void => {
+    const cleanPath = path.trim().replace(/[\\/]+$/, '')
+    if (!cleanPath || seen.has(`${kind}:${cleanPath.toLowerCase()}`)) return
+    if (kind === 'file' && !isSafeUninstallCandidate(cleanPath)) return
+    seen.add(`${kind}:${cleanPath.toLowerCase()}`)
+    candidates.push({
+      id: cryptoId(),
+      appId: installedApp.id,
+      kind,
+      path: cleanPath,
+      reason,
+      sizeBytes: 0,
+      selectedByDefault,
+      protected: false
+    })
+  }
+
+  if (installedApp.installLocation) add('file', expandEnv(installedApp.installLocation), 'Recorded installation directory', true)
+  const names = exactProductNames(installedApp.name)
+  const roots = [
+    process.env.LOCALAPPDATA,
+    process.env.APPDATA,
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, 'AppData', 'LocalLow') : undefined,
+    process.env.ProgramData
+  ].filter((root): root is string => Boolean(root))
+  for (const root of roots) {
+    for (const name of names) add('file', join(root, name), `Exact product folder under ${root}`, true)
+    if (installedApp.publisher) {
+      const publisher = exactProductNames(installedApp.publisher)[0]
+      if (publisher) for (const name of names) add('file', join(root, publisher, name), 'Exact publisher/product data folder', false)
+    }
+  }
+  if (installedApp.registryPath) add('registry', installedApp.registryPath, 'Registered uninstall entry still present', true)
+  for (const name of names) {
+    add('registry', `HKEY_CURRENT_USER\\Software\\${name}`, 'Exact per-user product registry key', false)
+    add('registry', `HKEY_LOCAL_MACHINE\\SOFTWARE\\${name}`, 'Exact machine-wide product registry key', false)
+    add('registry', `HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\${name}`, 'Exact 32-bit product registry key', false)
+  }
+  const publisher = exactProductNames(installedApp.publisher)[0]
+  if (publisher) {
+    for (const name of names) {
+      add('registry', `HKEY_CURRENT_USER\\Software\\${publisher}\\${name}`, 'Exact per-user publisher/product registry key', false)
+      add('registry', `HKEY_LOCAL_MACHINE\\SOFTWARE\\${publisher}\\${name}`, 'Exact machine publisher/product registry key', false)
+      add('registry', `HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\${publisher}\\${name}`, 'Exact 32-bit publisher/product registry key', false)
+    }
+  }
+  return candidates
+}
+
+function exactProductNames(displayName: string): string[] {
+  const cleaned = displayName
+    .replace(/[®™©]/g, '')
+    .replace(/\s+\((?:x64|x86|64-bit|32-bit)\)\s*$/i, '')
+    .replace(/\s+v?\d+(?:\.\d+){1,4}\s*$/i, '')
+    .trim()
+  return [...new Set([displayName.trim(), cleaned].filter((item) => item && item.length >= 2 && !/[<>:"/\\|?*]/.test(item)))]
+}
+
+function isSafeUninstallCandidate(path: string): boolean {
+  const normalized = path.toLowerCase()
+  const blocked = [
+    process.env.USERPROFILE,
+    process.env.LOCALAPPDATA,
+    process.env.APPDATA,
+    process.env.ProgramData,
+    process.env.ProgramFiles,
+    process.env['ProgramFiles(x86)'],
+    process.env.SystemDrive ? `${process.env.SystemDrive}\\` : undefined,
+    process.env.WINDIR
+  ]
+    .filter((item): item is string => Boolean(item))
+    .map((item) => item.replace(/[\\/]+$/, '').toLowerCase())
+  if (blocked.includes(normalized.replace(/[\\/]+$/, ''))) return false
+  const personalRoots = ['Documents', 'Desktop', 'Downloads', 'Pictures', 'Videos', 'Music', 'Saved Games'].map((name) =>
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, name).toLowerCase() : ''
+  )
+  return !personalRoots.some((root) => root && (normalized === root || normalized.startsWith(`${root}\\`)))
+}
+
+function isAdminPath(path: string): boolean {
+  const lower = path.toLowerCase()
+  return [process.env.ProgramData, process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.WINDIR]
+    .filter((item): item is string => Boolean(item))
+    .some((root) => lower.startsWith(root.toLowerCase()))
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 80) || 'leftover'
+}
+
+function uninstallLeftoverRemovalScript(payload: string, quarantine: string): string {
+  const escapedQuarantine = escapePowerShellSingle(quarantine)
+  return `
+$itemsJson = @'
+${payload}
+'@
+$items = $itemsJson | ConvertFrom-Json
+$quarantine = '${escapedQuarantine}'
+New-Item -ItemType Directory -Path $quarantine -Force | Out-Null
+$manifest = @()
+[int]$removed = 0
+[int]$failed = 0
+[int64]$bytes = 0
+foreach ($item in $items) {
+  try {
+    if ($item.kind -eq 'file') {
+      if (-not (Test-Path -LiteralPath $item.path)) { continue }
+      $destination = Join-Path $quarantine $item.quarantineName
+      Move-Item -LiteralPath $item.path -Destination $destination -Force -ErrorAction Stop
+      $manifest += [pscustomobject]@{ kind = 'file'; original = $item.path; backup = $destination }
+      $bytes += [int64]$item.sizeBytes
+    } else {
+      $backup = Join-Path $quarantine ($item.quarantineName + '.reg')
+      & reg.exe export $item.path $backup /y | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "Registry export failed with exit code $LASTEXITCODE" }
+      Remove-Item -LiteralPath ('Registry::' + $item.path) -Recurse -Force -ErrorAction Stop
+      $manifest += [pscustomobject]@{ kind = 'registry'; original = $item.path; backup = $backup }
+    }
+    $removed++
+  } catch {
+    $failed++
+  }
+}
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $quarantine 'manifest.json') -Encoding UTF8
+[pscustomobject]@{ removed = $removed; failed = $failed; quarantinedBytes = $bytes; quarantine = $quarantine } | ConvertTo-Json -Compress
+`
+}
+
+function uninstallLeftoverRestoreScript(quarantine: string): string {
+  const escapedQuarantine = escapePowerShellSingle(quarantine)
+  return `
+$quarantine = '${escapedQuarantine}'
+$manifestPath = Join-Path $quarantine 'manifest.json'
+if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'Quarantine manifest was not found.' }
+$items = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+foreach ($item in $items) {
+  if ($item.kind -eq 'file') {
+    if (Test-Path -LiteralPath $item.backup) {
+      New-Item -ItemType Directory -Path (Split-Path -Parent $item.original) -Force | Out-Null
+      Move-Item -LiteralPath $item.backup -Destination $item.original -Force
+    }
+  } elseif (Test-Path -LiteralPath $item.backup) {
+    & reg.exe import $item.backup | Out-Null
+  }
+}
+"Restored quarantined leftovers from $quarantine"
+`
 }
 
 function parseCsv(text: string): Record<string, string>[] {
@@ -1232,26 +1736,32 @@ function safeDeleteScript(paths: string[]): string {
     '[int64]$bytes = 0',
     '[int]$deleted = 0',
     '[int]$failed = 0',
+    '[bool]$capped = $false',
+    '$timer = [System.Diagnostics.Stopwatch]::StartNew()',
+    '$maxFiles = 50000',
+    '$maxMs = 90000',
     'foreach ($p in $paths) {',
-    '  $items = @()',
-    '  try { $items = @(Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) } catch {}',
-    '  foreach ($item in $items) {',
-    '    try {',
-    '      $size = [int64]$item.Length',
-    '      Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop',
-    '      $bytes += $size',
-    '      $deleted++',
-    '    } catch {',
-    '      $failed++',
+    '  try {',
+    '    foreach ($item in Get-ChildItem -Path $p -Force -File -Recurse -ErrorAction SilentlyContinue) {',
+    '      if ($timer.ElapsedMilliseconds -gt $maxMs -or $deleted -ge $maxFiles) { $capped = $true; break }',
+    '      try {',
+    '        $size = [int64]$item.Length',
+    '        Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop',
+    '        $bytes += $size',
+    '        $deleted++',
+    '      } catch {',
+    '        $failed++',
+    '      }',
     '    }',
-    '  }',
+    '  } catch {}',
+    '  if ($capped) { break }',
     '  try {',
     '    Get-ChildItem -Path $p -Force -Directory -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object {',
     '      try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch {}',
     '    }',
     '  } catch {}',
     '}',
-    '[pscustomobject]@{ paths = @($paths).Count; deletedFiles = $deleted; failedFiles = $failed; deletedBytes = $bytes } | ConvertTo-Json -Compress'
+    '[pscustomobject]@{ paths = @($paths).Count; deletedFiles = $deleted; failedFiles = $failed; deletedBytes = $bytes; capped = $capped } | ConvertTo-Json -Compress'
   ].join('\n')
 }
 

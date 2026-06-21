@@ -19,6 +19,7 @@ import {
   Maximize2,
   Minus,
   Monitor,
+  PackageOpen,
   Palette,
   Play,
   RefreshCw,
@@ -39,14 +40,17 @@ import type {
   CleanTarget,
   CommandLogEntry,
   FeatureToggle,
+  InstalledApp,
+  LeftoverCandidate,
   NvidiaProfile,
   NvidiaState,
+  OperationProgress,
   ScheduledTaskRow,
   SystemInfo,
   UpdateCheckResult
 } from '../../shared/types'
 
-type TabId = 'tasks' | 'system' | 'cleaning' | 'nvidia' | 'logs' | 'about'
+type TabId = 'tasks' | 'system' | 'cleaning' | 'uninstaller' | 'nvidia' | 'logs' | 'about'
 type ThemeId = 'mint' | 'blue' | 'violet' | 'amber' | 'mono'
 type NvidiaActionKey = keyof Omit<ApplyNvidiaProfileRequest, 'profile'>
 
@@ -54,6 +58,7 @@ const tabs: Array<{ id: TabId; label: string; icon: typeof Gauge }> = [
   { id: 'tasks', label: 'Tasks', icon: Gauge },
   { id: 'system', label: 'System', icon: Cpu },
   { id: 'cleaning', label: 'Cleaning', icon: Eraser },
+  { id: 'uninstaller', label: 'Uninstaller', icon: PackageOpen },
   { id: 'nvidia', label: 'NVIDIA', icon: Sparkles },
   { id: 'logs', label: 'Logs', icon: DatabaseBackup },
   { id: 'about', label: 'About', icon: Info }
@@ -87,6 +92,7 @@ function App(): JSX.Element {
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('Ready. Actions apply only when you click them.')
   const [version, setVersion] = useState('')
+  const [operationProgress, setOperationProgress] = useState<OperationProgress | null>(null)
   const [theme, setTheme] = useState<ThemeId>(() => {
     const saved = localStorage.getItem('optimizer-theme') as ThemeId | null
     return themes.some((item) => item.id === saved) ? saved! : 'mint'
@@ -100,6 +106,8 @@ function App(): JSX.Element {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('optimizer-theme', theme)
   }, [theme])
+
+  useEffect(() => window.optimizerGuard.onOperationProgress(setOperationProgress), [])
 
   async function bootstrap(): Promise<void> {
     const [loadedSettings, loadedSnapshot, appVersion] = await Promise.all([
@@ -212,7 +220,12 @@ function App(): JSX.Element {
           <TaskDisabler settings={settings} runBusy={runBusy} setNotice={setNotice} snapshot={snapshot} />
         )}
         {activeTab === 'system' && <SystemPanel runBusy={runBusy} />}
-        {activeTab === 'cleaning' && <CleaningPanel settings={settings} runBusy={runBusy} setNotice={setNotice} />}
+        {activeTab === 'cleaning' && (
+          <CleaningPanel settings={settings} runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+        )}
+        {activeTab === 'uninstaller' && (
+          <UninstallerPanel runBusy={runBusy} setNotice={setNotice} progress={operationProgress} />
+        )}
         {activeTab === 'nvidia' && (
           <NvidiaPanel settings={settings} saveSettings={saveSettings} runBusy={runBusy} setNotice={setNotice} />
         )}
@@ -500,21 +513,33 @@ function SystemPanel({
 function CleaningPanel({
   settings,
   runBusy,
-  setNotice
+  setNotice,
+  progress
 }: {
   settings: AppSettings
   runBusy: <T>(label: string, task: () => Promise<T>, success?: string) => Promise<T | null>
   setNotice: (notice: string) => void
+  progress: OperationProgress | null
 }): JSX.Element {
   const [targets, setTargets] = useState<CleanTarget[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [resultState, setResultState] = useState<'idle' | 'running' | 'finished' | 'failed'>('idle')
+  const [resultText, setResultText] = useState('')
   const selectedBytes = targets.reduce((sum, target) => (selected.has(target.id) ? sum + target.estimatedBytes : sum), 0)
+  const cleaningProgress = progress?.operation.startsWith('clean-') ? progress : null
 
   async function scan(): Promise<void> {
+    setResultState('running')
+    setResultText('Scanning safe cleanup locations...')
     const result = await runBusy('Scanning safe cleanup locations...', () => window.optimizerGuard.scanCleaning(), 'Scan complete. Select targets, then clean selected.')
     if (result) {
       setTargets(result)
       setSelected(new Set(result.filter((target) => target.selectedByDefault && target.detected).map((target) => target.id)))
+      setResultState('finished')
+      setResultText(`Scan finished. ${result.filter((target) => target.detected).length} cleanup categories contain removable data.`)
+    } else {
+      setResultState('failed')
+      setResultText('Scan stopped. Open Logs for the command error.')
     }
   }
 
@@ -535,6 +560,8 @@ function CleaningPanel({
       .filter(Boolean)
       .join('\n')
     if (!window.confirm(message)) return
+    setResultState('running')
+    setResultText('Cleaning selected targets...')
     const result = await runBusy('Cleaning selected targets...', async () => {
       const cleaned = await window.optimizerGuard.cleanSelected([...selected])
       assertLogsSuccess(cleaned.logs)
@@ -546,7 +573,13 @@ function CleaningPanel({
         setTargets((current) => current.map((target) => refreshed.get(target.id) ?? target))
         setSelected(new Set(result.targets.filter((target) => selected.has(target.id) && target.detected).map((target) => target.id)))
       }
-      setNotice(`Cleanup finished. Estimated remaining selected data: ${formatBytes(result.afterBytes)}. Estimated saved: ${formatBytes(result.savedBytes)}.`)
+      const finished = `Finished. Freed approximately ${formatBytes(result.savedBytes)}; ${formatBytes(result.afterBytes)} remains in selected targets.`
+      setResultState('finished')
+      setResultText(finished)
+      setNotice(finished)
+    } else {
+      setResultState('failed')
+      setResultText('Cleanup stopped before completion. Open Logs to see which target failed or timed out.')
     }
   }
 
@@ -559,16 +592,23 @@ function CleaningPanel({
         icon={<Trash2 />}
       />
       <div className="toolbar">
-        <button className="primary" onClick={() => void scan()}>
+        <button className="primary" onClick={() => void scan()} disabled={resultState === 'running'}>
           <Search size={16} />
           Scan
         </button>
-        <button className="danger-button" onClick={() => void clean()} disabled={targets.length === 0}>
+        <button className="danger-button" onClick={() => void clean()} disabled={targets.length === 0 || resultState === 'running'}>
           <Trash2 size={16} />
           Clean selected
         </button>
         <span className="pill">{selectedBytes > 0 ? `${formatBytes(selectedBytes)} selected` : 'Nothing selected'}</span>
       </div>
+      {resultState !== 'idle' && (
+        <OperationProgressCard
+          progress={cleaningProgress}
+          state={resultState}
+          fallbackLabel={resultText}
+        />
+      )}
       <div className="clean-grid">
         {targets.map((target) => (
           <label className={target.detected ? 'clean-card' : 'clean-card dim'} key={target.id}>
@@ -600,6 +640,236 @@ function CleaningPanel({
       </div>
       {targets.length === 0 && <EmptyHint text="Click Scan first. Cleaning stays locked until we estimate safe targets." setNotice={setNotice} />}
     </section>
+  )
+}
+
+function UninstallerPanel({
+  runBusy,
+  setNotice,
+  progress
+}: {
+  runBusy: <T>(label: string, task: () => Promise<T>, success?: string) => Promise<T | null>
+  setNotice: (notice: string) => void
+  progress: OperationProgress | null
+}): JSX.Element {
+  const [apps, setApps] = useState<InstalledApp[]>([])
+  const [search, setSearch] = useState('')
+  const [selectedApp, setSelectedApp] = useState<InstalledApp | null>(null)
+  const [leftovers, setLeftovers] = useState<LeftoverCandidate[]>([])
+  const [selectedLeftovers, setSelectedLeftovers] = useState<Set<string>>(new Set())
+  const [resultState, setResultState] = useState<'idle' | 'running' | 'finished' | 'failed'>('idle')
+  const [resultText, setResultText] = useState('')
+  const uninstallProgress = progress?.operation.startsWith('uninstall-') ? progress : null
+  const visibleApps = apps.filter((app) => `${app.name} ${app.publisher}`.toLowerCase().includes(search.toLowerCase()))
+  const selectedBytes = leftovers.reduce((sum, item) => (selectedLeftovers.has(item.id) ? sum + item.sizeBytes : sum), 0)
+
+  useEffect(() => {
+    void refreshApps()
+  }, [])
+
+  async function refreshApps(): Promise<void> {
+    const result = await runBusy('Reading installed applications from Windows...', () => window.optimizerGuard.queryInstalledApps())
+    if (result) {
+      setApps(result)
+      setSelectedApp((current) => result.find((app) => app.name === current?.name && app.publisher === current?.publisher) ?? result[0] ?? null)
+      setNotice(`Loaded ${result.length} uninstallable applications.`)
+    }
+  }
+
+  async function launch(): Promise<void> {
+    if (!selectedApp) return
+    if (!window.confirm(`Run the registered uninstaller for ${selectedApp.name}?\n\nOptimizer Guard will not remove leftovers until you scan and approve them afterward.`)) return
+    setResultState('running')
+    setResultText('Launching the application vendor uninstaller...')
+    const result = await runBusy(`Launching ${selectedApp.name} uninstaller...`, () => window.optimizerGuard.launchUninstaller(selectedApp.id))
+    if (result) {
+      assertCommandSuccess(result.log)
+      setResultState('finished')
+      setResultText('Uninstaller launched. Finish its wizard, then click Scan leftovers.')
+      setNotice('Official uninstaller launched. Complete it before scanning leftovers.')
+    } else {
+      setResultState('failed')
+      setResultText('The registered uninstaller could not be launched. Check Logs for details.')
+    }
+  }
+
+  async function scanLeftovers(): Promise<void> {
+    if (!selectedApp) return
+    setResultState('running')
+    setResultText(`Scanning high-confidence leftovers for ${selectedApp.name}...`)
+    const result = await runBusy('Scanning uninstall leftovers...', () => window.optimizerGuard.scanUninstallLeftovers(selectedApp.id))
+    if (result) {
+      setLeftovers(result)
+      setSelectedLeftovers(new Set(result.filter((item) => item.selectedByDefault && !item.protected).map((item) => item.id)))
+      setResultState('finished')
+      setResultText(result.length ? `Scan finished. Review ${result.length} leftover item${result.length === 1 ? '' : 's'} before removal.` : 'Scan finished. No high-confidence leftovers were found.')
+    } else {
+      setResultState('failed')
+      setResultText('Leftover scan failed. No files or registry entries were changed.')
+    }
+  }
+
+  async function removeLeftovers(): Promise<void> {
+    const chosen = leftovers.filter((item) => selectedLeftovers.has(item.id))
+    if (chosen.length === 0) {
+      setNotice('Select at least one leftover first.')
+      return
+    }
+    if (!window.confirm(`Quarantine ${chosen.length} selected leftover${chosen.length === 1 ? '' : 's'}?\n\nFiles are moved to Optimizer Guard quarantine and registry keys are exported before removal. Personal folders and saves are excluded.`)) return
+    setResultState('running')
+    setResultText('Quarantining selected leftovers...')
+    const result = await runBusy('Quarantining uninstall leftovers...', () => window.optimizerGuard.removeUninstallLeftovers([...selectedLeftovers]))
+    if (result) {
+      assertLogsSuccess(result.logs)
+      setLeftovers((current) => current.filter((item) => !selectedLeftovers.has(item.id)))
+      setSelectedLeftovers(new Set())
+      setResultState('finished')
+      setResultText(`Finished. ${result.removed} item${result.removed === 1 ? '' : 's'} quarantined (${formatBytes(result.quarantinedBytes)}); ${result.failed} failed.`)
+      setNotice('Leftover cleanup finished and a restore point was recorded.')
+    } else {
+      setResultState('failed')
+      setResultText('Leftover cleanup failed. Check Logs; successful moves remain restorable from Logs / Restore.')
+    }
+  }
+
+  return (
+    <section className="page uninstaller-page">
+      <PageHero
+        eyebrow="Official uninstall, then reviewed cleanup"
+        title="Remove applications without blind deletion."
+        text="Uses Windows uninstall records first. Leftovers are scanned separately, reviewed by you, and quarantined before registry cleanup."
+        icon={<PackageOpen />}
+      />
+      <div className="uninstaller-layout">
+        <div className="panel app-picker">
+          <div className="toolbar compact">
+            <div className="search">
+              <Search size={15} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search installed apps..." />
+            </div>
+            <button onClick={() => void refreshApps()}>
+              <RefreshCw size={15} />
+              Refresh
+            </button>
+          </div>
+          <div className="app-list">
+            {visibleApps.map((app) => (
+              <button
+                className={selectedApp?.id === app.id ? 'app-row selected' : 'app-row'}
+                key={app.id}
+                onClick={() => {
+                  setSelectedApp(app)
+                  setLeftovers([])
+                  setSelectedLeftovers(new Set())
+                  setResultState('idle')
+                }}
+              >
+                <span className="app-icon"><PackageOpen size={17} /></span>
+                <span>
+                  <strong>{app.name}</strong>
+                  <small>{[app.publisher, app.version].filter(Boolean).join(' · ') || 'Publisher not listed'}</small>
+                </span>
+                <small>{app.estimatedSizeBytes ? formatBytes(app.estimatedSizeBytes) : ''}</small>
+              </button>
+            ))}
+            {visibleApps.length === 0 && <span className="muted app-list-empty">No matching uninstall entries.</span>}
+          </div>
+        </div>
+
+        <div className="uninstaller-workspace">
+          {!selectedApp && <EmptyHint text="Select an application to inspect its registered uninstall details." setNotice={setNotice} />}
+          {selectedApp && (
+            <>
+              <div className="panel uninstall-summary">
+                <div>
+                  <span className="eyebrow">Selected application</span>
+                  <h2>{selectedApp.name}</h2>
+                  <p>{selectedApp.publisher || 'Publisher not listed'} {selectedApp.version ? `· ${selectedApp.version}` : ''}</p>
+                  <small className="muted">{selectedApp.installLocation || 'Install location not registered'}</small>
+                </div>
+                <div className="uninstall-actions">
+                  <button className="danger-button" onClick={() => void launch()} disabled={resultState === 'running'}>
+                    <Play size={15} />
+                    Run uninstaller
+                  </button>
+                  <button onClick={() => void scanLeftovers()} disabled={resultState === 'running'}>
+                    <Search size={15} />
+                    Scan leftovers
+                  </button>
+                </div>
+              </div>
+              {resultState !== 'idle' && <OperationProgressCard progress={uninstallProgress} state={resultState} fallbackLabel={resultText} />}
+              {leftovers.length > 0 && (
+                <div className="panel leftovers-panel">
+                  <div className="table-head">
+                    <span>{leftovers.length} high-confidence leftovers</span>
+                    <span>{formatBytes(selectedBytes)} selected</span>
+                  </div>
+                  <div className="leftover-list">
+                    {leftovers.map((item) => (
+                      <label className="leftover-row" key={item.id}>
+                        <input
+                          type="checkbox"
+                          checked={selectedLeftovers.has(item.id)}
+                          disabled={item.protected}
+                          onChange={(event) => {
+                            const next = new Set(selectedLeftovers)
+                            if (event.target.checked) next.add(item.id)
+                            else next.delete(item.id)
+                            setSelectedLeftovers(next)
+                          }}
+                        />
+                        <span>
+                          <strong>{item.kind === 'registry' ? 'Registry entry' : 'File or folder'}</strong>
+                          <small>{item.path}</small>
+                          <small>{item.reason}</small>
+                        </span>
+                        <small>{item.kind === 'file' ? formatBytes(item.sizeBytes) : 'Registry'}</small>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="toolbar compact">
+                    <button className="danger-button" onClick={() => void removeLeftovers()} disabled={selectedLeftovers.size === 0 || resultState === 'running'}>
+                      <Trash2 size={15} />
+                      Quarantine selected
+                    </button>
+                    <span className="muted">Game saves and personal folders are always excluded.</span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function OperationProgressCard({
+  progress,
+  state,
+  fallbackLabel
+}: {
+  progress: OperationProgress | null
+  state: 'idle' | 'running' | 'finished' | 'failed'
+  fallbackLabel: string
+}): JSX.Element {
+  const percent = progress && progress.total > 0 ? Math.min(100, Math.round((progress.current / progress.total) * 100)) : state === 'finished' ? 100 : 8
+  const label = progress?.label || fallbackLabel
+  return (
+    <div className={`operation-progress ${state}`}>
+      <div className="operation-progress-head">
+        <span>
+          {state === 'finished' ? <CheckCircle2 size={16} /> : state === 'failed' ? <ShieldAlert size={16} /> : <RefreshCw size={16} className="spin" />}
+          <strong>{state === 'finished' ? 'Finished' : state === 'failed' ? 'Stopped' : 'Working'}</strong>
+        </span>
+        <span>{state === 'running' ? `${percent}%` : state === 'finished' ? '100%' : ''}</span>
+      </div>
+      <div className="progress-track">
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <small>{label}</small>
+    </div>
   )
 }
 

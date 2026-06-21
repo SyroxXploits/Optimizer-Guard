@@ -8,9 +8,14 @@ import type {
   CleanTarget,
   CommandLogEntry,
   FeatureToggle,
+  InstalledApp,
+  LeftoverCandidate,
+  LeftoverRemovalResult,
   NvidiaState,
+  OperationProgress,
   ScheduledTaskRow,
   SystemInfo,
+  UninstallLaunchResult,
   UpdateCheckResult
 } from '../../shared/types'
 
@@ -35,6 +40,11 @@ interface OptimizerGuardApi {
   setFeatureState: (featureName: string, enable: boolean) => Promise<CommandLogEntry>
   scanCleaning: () => Promise<CleanTarget[]>
   cleanSelected: (ids: string[]) => Promise<CleanResult>
+  onOperationProgress: (callback: (progress: OperationProgress) => void) => () => void
+  queryInstalledApps: () => Promise<InstalledApp[]>
+  launchUninstaller: (appId: string) => Promise<UninstallLaunchResult>
+  scanUninstallLeftovers: (appId: string) => Promise<LeftoverCandidate[]>
+  removeUninstallLeftovers: (ids: string[]) => Promise<LeftoverRemovalResult>
   getNvidiaState: () => Promise<NvidiaState>
   applyNvidiaProfile: (request: ApplyNvidiaProfileRequest) => Promise<CommandLogEntry[]>
   restore: (id: string) => Promise<CommandLogEntry | null>

@@ -7,9 +7,14 @@ import type {
   CleanTarget,
   CommandLogEntry,
   FeatureToggle,
+  InstalledApp,
+  LeftoverCandidate,
+  LeftoverRemovalResult,
   NvidiaState,
+  OperationProgress,
   ScheduledTaskRow,
   SystemInfo,
+  UninstallLaunchResult,
   UpdateCheckResult
 } from '../shared/types'
 
@@ -46,12 +51,12 @@ const demoSnapshot = {
 } as AppSnapshot
 
 const demoApi = {
-  appVersion: async () => '1.0.9',
+  appVersion: async () => '1.1.0',
   checkForUpdates: async () => ({
-    currentVersion: '1.0.9',
-    latestVersion: '1.0.9',
-    releaseName: 'Optimizer Guard v1.0.9',
-    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.0.9',
+    currentVersion: '1.1.0',
+    latestVersion: '1.1.0',
+    releaseName: 'Optimizer Guard v1.1.0',
+    releaseUrl: 'https://github.com/SyroxXploits/Optimizer-Guard/releases/tag/v1.1.0',
     isUpdateAvailable: false
   }),
   minimize: async () => undefined,
@@ -247,6 +252,11 @@ const demoApi = {
     }
   ],
   cleanSelected: async () => ({ beforeBytes: 2254857830, afterBytes: 0, savedBytes: 2254857830, logs: demoSnapshot.logs }),
+  onOperationProgress: () => () => undefined,
+  queryInstalledApps: async () => [] as InstalledApp[],
+  launchUninstaller: async () => ({ app: {} as InstalledApp, log: demoSnapshot.logs[0] }) as UninstallLaunchResult,
+  scanUninstallLeftovers: async () => [] as LeftoverCandidate[],
+  removeUninstallLeftovers: async () => ({ removed: 0, failed: 0, quarantinedBytes: 0, logs: [] }) as LeftoverRemovalResult,
   getNvidiaState: async () => ({
     profile: {
       gpuName: 'NVIDIA GeForce RTX 4070 Ti SUPER',
@@ -346,6 +356,15 @@ const optimizerGuard = process.env.OPTIMIZER_GUARD_DEMO === '1' ? demoApi : {
 
   scanCleaning: (): Promise<CleanTarget[]> => ipcRenderer.invoke('clean:scan'),
   cleanSelected: (ids: string[]): Promise<CleanResult> => ipcRenderer.invoke('clean:run', ids),
+  onOperationProgress: (callback: (progress: OperationProgress) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: OperationProgress): void => callback(progress)
+    ipcRenderer.on('operation:progress', listener)
+    return () => ipcRenderer.removeListener('operation:progress', listener)
+  },
+  queryInstalledApps: (): Promise<InstalledApp[]> => ipcRenderer.invoke('uninstall:query'),
+  launchUninstaller: (appId: string): Promise<UninstallLaunchResult> => ipcRenderer.invoke('uninstall:launch', appId),
+  scanUninstallLeftovers: (appId: string): Promise<LeftoverCandidate[]> => ipcRenderer.invoke('uninstall:scan-leftovers', appId),
+  removeUninstallLeftovers: (ids: string[]): Promise<LeftoverRemovalResult> => ipcRenderer.invoke('uninstall:remove-leftovers', ids),
 
   getNvidiaState: (): Promise<NvidiaState> => ipcRenderer.invoke('nvidia:state'),
   applyNvidiaProfile: (request: ApplyNvidiaProfileRequest): Promise<CommandLogEntry[]> =>
