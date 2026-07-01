@@ -897,21 +897,45 @@ h3 {
   grid-template-columns: minmax(520px, 1fr) 310px;
   gap: 12px;
   min-height: 0;
+  flex: 1 1 auto;
 }
 
 .app-picker,
 .leftovers-panel {
   padding: 0;
   overflow: hidden;
+  min-height: 0;
+}
+
+.app-picker,
+.leftovers-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.uninstaller-page {
+  height: calc(100vh - 50px);
+  overflow: hidden;
+}
+
+.uninstaller-page:has(.leftovers-panel) .uninstaller-layout {
+  flex: 0 1 clamp(180px, 28vh, 360px);
+}
+
+.uninstaller-page .batch-panel {
+  min-height: 0;
+  overflow: auto;
 }
 
 .toolbar.compact {
   margin: 0;
   padding: 10px;
+  flex: 0 0 auto;
 }
 
 .app-list {
-  max-height: calc(100vh - 390px);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   border-top: 1px solid var(--line);
 }
@@ -1084,13 +1108,19 @@ h3 {
 }
 
 .leftover-list {
-  max-height: 280px;
-  min-height: 100px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 
 .leftovers-panel.wide {
   padding: 0;
+  flex: 0 1 clamp(150px, 20vh, 280px);
+  min-height: 150px;
+}
+
+.leftovers-panel .table-head {
+  flex: 0 0 auto;
 }
 
 .leftover-row {
@@ -1317,5 +1347,37 @@ h3 {
   .uninstaller-layout,
   .uninstall-commandbar {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 780px) {
+  .uninstaller-page {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .uninstaller-page .hero {
+    padding: 10px 12px;
+  }
+
+  .uninstaller-page .hero-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .uninstaller-page .hero h1 {
+    font-size: 24px;
+  }
+
+  .uninstall-commandbar {
+    padding: 8px;
+  }
+
+  .uninstaller-page:has(.leftovers-panel) .uninstaller-layout {
+    flex-basis: clamp(170px, 26vh, 330px);
+  }
+
+  .leftovers-panel.wide {
+    flex-basis: clamp(145px, 19vh, 250px);
   }
 }
