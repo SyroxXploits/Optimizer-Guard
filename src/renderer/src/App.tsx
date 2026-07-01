@@ -916,6 +916,12 @@ function UninstallerPanel({
             <Search size={15} />
             Review leftovers
           </button>
+          {leftovers.length > 0 && (
+            <button className="danger-button batch-action" onClick={() => void removeLeftovers()} disabled={selectedLeftovers.size === 0 || resultState === 'running'}>
+              <Trash2 size={16} />
+              Clean selected leftovers
+            </button>
+          )}
           <button
             onClick={() => {
               setSelectedApps(new Set())
@@ -968,7 +974,7 @@ function UninstallerPanel({
           <div className="toolbar compact">
             <button className="danger-button" onClick={() => void removeLeftovers()} disabled={selectedLeftovers.size === 0 || resultState === 'running'}>
               <Trash2 size={15} />
-              Quarantine selected
+              Clean selected leftovers
             </button>
             <span className="muted">Game saves and personal folders are always excluded.</span>
           </div>
