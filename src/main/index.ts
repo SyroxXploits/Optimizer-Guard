@@ -143,8 +143,10 @@ async function runSmokeTest(window: BrowserWindow | null): Promise<void> {
   await check('installed app ids remain stable', `
     Promise.all([window.optimizerGuard.queryInstalledApps(), window.optimizerGuard.queryInstalledApps()]).then(([first, second]) => {
       const stable = first.slice(0, 20).every((app, index) => app.id === second[index]?.id)
+      const uniqueIds = new Set(first.map((app) => app.id))
       if (!stable) throw new Error('Installed app IDs changed between refreshes.')
-      return { checked: Math.min(20, first.length), stable }
+      if (uniqueIds.size !== first.length) throw new Error(\`Installed app IDs are not unique: \${first.length - uniqueIds.size} duplicate ID(s).\`)
+      return { checked: Math.min(20, first.length), total: first.length, unique: uniqueIds.size, stable }
     })
   `)
   try {

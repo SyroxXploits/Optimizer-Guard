@@ -1,5 +1,6 @@
 import { app, shell } from 'electron'
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
 import { dirname, join, parse } from 'path'
 import os from 'os'
@@ -1647,7 +1648,7 @@ function parseUninstallCommand(commandLine: string): { executable: string; args:
 }
 
 function installedAppId(registryPath: string, name: string): string {
-  return `app-${Buffer.from(`${registryPath}|${name}`.toLowerCase(), 'utf8').toString('base64url').slice(0, 72)}`
+  return `app-${createHash('sha256').update(`${registryPath}|${name}`.toLowerCase()).digest('hex').slice(0, 32)}`
 }
 
 function detectInstallDrive(installLocation: string, uninstallString: string): string {
