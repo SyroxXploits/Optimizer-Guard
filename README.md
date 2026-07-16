@@ -135,3 +135,9 @@ $env:OPTIMIZER_GUARD_CAPTURE='1'
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Project policies
+
+- [Privacy](PRIVACY.md)
+- [Security](SECURITY.md)
+- [Code signing](CODE_SIGNING_POLICY.md)
